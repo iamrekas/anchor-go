@@ -8,7 +8,6 @@ import (
 	. "github.com/gagliardetto/utilz"
 )
 
-// https://github.com/project-serum/anchor/blob/97e9e03fb041b8b888a9876a7c0676d9bb4736f3/ts/src/idl.ts
 type IDL struct {
 	Version      string           `json:"version"`
 	Name         string           `json:"name"`
@@ -24,7 +23,6 @@ type IDL struct {
 	Metadata *IdlMetadata `json:"metadata,omitempty"` // NOTE: deprecated
 }
 
-// TODO: write generator
 type IdlConstant struct {
 	Name  string
 	Type  IdlType
@@ -111,6 +109,7 @@ type IdlState struct {
 type IdlStateMethod = IdlInstruction
 
 // type IdlAccountItem = IdlAccount | IdlAccounts;
+
 type IdlAccountItem struct {
 	IdlAccount  *IdlAccount
 	IdlAccounts *IdlAccounts
