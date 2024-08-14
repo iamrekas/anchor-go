@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	. "github.com/dave/jennifer/jen"
-	"github.com/encrypt-x/solana-anchor-go/sighash"
 	"github.com/gagliardetto/solana-go"
 	. "github.com/gagliardetto/utilz"
+	"github.com/iamrekas/anchor-go/sighash"
 )
 
 func ToPackageName(s string) string {

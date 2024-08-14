@@ -13,9 +13,9 @@ import (
 	"time"
 
 	. "github.com/dave/jennifer/jen"
-	"github.com/encrypt-x/solana-anchor-go/sighash"
 	bin "github.com/gagliardetto/binary"
 	. "github.com/gagliardetto/utilz"
+	"github.com/iamrekas/anchor-go/sighash"
 	"golang.org/x/mod/modfile"
 )
 

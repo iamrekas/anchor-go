@@ -1,4 +1,4 @@
-module github.com/encrypt-x/solana-anchor-go
+module github.com/iamrekas/anchor-go
 
 go 1.22
 

@@ -3,9 +3,10 @@ package example
 import (
 	_ "embed"
 	"fmt"
-	"github.com/encrypt-x/solana-anchor-go/generated/restaking"
+
 	ag_binary "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
+	"github.com/iamrekas/anchor-go/generated/restaking"
 )
 
 var restakingProgramID = solana.MustPublicKeyFromBase58("fragfP1Z2DXiXNuDYaaCnbGvusMP1DNQswAqTwMuY6e")

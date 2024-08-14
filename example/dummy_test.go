@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
 	"github.com/davecgh/go-spew/spew"
-	"github.com/encrypt-x/solana-anchor-go/generated/dummy"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
+	"github.com/iamrekas/anchor-go/generated/dummy"
 )
 
 //go:embed dummy_tx.json
