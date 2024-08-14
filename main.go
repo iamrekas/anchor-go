@@ -13,7 +13,7 @@ import (
 	"time"
 
 	. "github.com/dave/jennifer/jen"
-	"github.com/gagliardetto/anchor-go/sighash"
+	"github.com/encrypt-x/solana-anchor-go/sighash"
 	bin "github.com/gagliardetto/binary"
 	. "github.com/gagliardetto/utilz"
 	"golang.org/x/mod/modfile"
@@ -32,6 +32,7 @@ func main() {
 	filenames := FlagStringArray{}
 	flag.Var(&filenames, "src", "Path to source; can use multiple times.")
 	flag.StringVar(&conf.DstDir, "dst", generatedDir, "Destination folder")
+	flag.StringVar(&conf.Package, "pkg", "", "Set package name to generate, default value is metadata.name of the source IDL.")
 	flag.BoolVar(&conf.Debug, "debug", false, "debug mode")
 	flag.BoolVar(&conf.RemoveAccountSuffix, "remove-account-suffix", false, "Remove \"Account\" suffix from accessors (if leads to duplication, e.g. \"SetFooAccountAccount\")")
 
@@ -63,16 +64,7 @@ func main() {
 			panic(err)
 		}
 		if !exists {
-			if GetConfig().DstDir == generatedDir {
-				MustCreateFolderIfNotExists(generatedDir, os.ModePerm)
-			} else {
-				Sfln(
-					"[%s] destination dir doesn't exist: %s",
-					Red(XMark),
-					GetConfig().DstDir,
-				)
-				os.Exit(1)
-			}
+			MustCreateFolderIfNotExists(GetConfig().DstDir, os.ModePerm)
 		}
 	}
 
@@ -109,18 +101,18 @@ func main() {
 					OrangeBG("[?]"),
 				)
 			}
-			if len(idl.Events) > 0 {
-				Sfln(
-					"%s idl.Events is defined, but generator is not implemented yet.",
-					OrangeBG("[?]"),
-				)
-			}
-			if len(idl.Errors) > 0 {
-				Sfln(
-					"%s idl.Errors is defined, but generator is not implemented yet.",
-					OrangeBG("[?]"),
-				)
-			}
+			//if len(idl.Events) > 0 {
+			//	Sfln(
+			//		"%s idl.Events is defined, but generator is not implemented yet.",
+			//		OrangeBG("[?]"),
+			//	)
+			//}
+			//if len(idl.Errors) > 0 {
+			//	Sfln(
+			//		"%s idl.Errors is defined, but generator is not implemented yet.",
+			//		OrangeBG("[?]"),
+			//	)
+			//}
 			if len(idl.Constants) > 0 {
 				Sfln(
 					"%s idl.Constants is defined, but generator is not implemented yet.",
@@ -132,13 +124,13 @@ func main() {
 		// spew.Dump(idl)
 
 		// Create subfolder for package for generated assets:
-		packageAssetFolderName := sighash.ToRustSnakeCase(idl.Name)
+		packageAssetFolderName := sighash.ToRustSnakeCase(idl.Metadata.Name)
 		var dstDirForFiles string
 		if GetConfig().Debug {
 			packageAssetFolderPath := path.Join(GetConfig().DstDir, packageAssetFolderName)
 			MustCreateFolderIfNotExists(packageAssetFolderPath, os.ModePerm)
 			// Create folder for assets generated during this run:
-			thisRunAssetFolderName := ToLowerCamel(idl.Name) + "_" + ts.Format(FilenameTimeFormat)
+			thisRunAssetFolderName := ToLowerCamel(idl.Metadata.Name) + "_" + ts.Format(FilenameTimeFormat)
 			thisRunAssetFolderPath := path.Join(packageAssetFolderPath, thisRunAssetFolderName)
 			// Create a new assets folder inside the main assets folder:
 			MustCreateFolderIfNotExists(thisRunAssetFolderPath, os.ModePerm)
@@ -169,19 +161,19 @@ func main() {
 			mdf.AddNewRequire("github.com/davecgh/go-spew", "v1.1.1", false)
 			mdf.Cleanup()
 
-			callbacks = append(callbacks, func() {
-				Ln()
-				Ln(Bold("Don't forget to import the necessary dependencies!"))
-				Ln()
-				for _, v := range mdf.Require {
-					Sfln(
-						"	go get %s@%s",
-						v.Mod.Path,
-						v.Mod.Version,
-					)
-				}
-				Ln()
-			})
+			//callbacks = append(callbacks, func() {
+			//	Ln()
+			//	Ln(Bold("Don't forget to import the necessary dependencies!"))
+			//	Ln()
+			//	for _, v := range mdf.Require {
+			//		Sfln(
+			//			"	go get %s@%s",
+			//			v.Mod.Path,
+			//			v.Mod.Version,
+			//		)
+			//	}
+			//	Ln()
+			//})
 
 			if GetConfig().ModPath != "" {
 				mfBytes, err := mdf.Format()
@@ -246,6 +238,14 @@ func FormatSighash(buf []byte) string {
 }
 
 func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
+	if idl.Address == "" {
+		idl.Address = idl.Metadata.Address
+	}
+
+	if GetConfig().Package != "" {
+		idl.Metadata.Name = GetConfig().Package
+	}
+
 	if err := idl.Validate(); err != nil {
 		return nil, err
 	}
@@ -258,6 +258,31 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		file.Add(Empty().Id(`
+func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instruction, err error) {
+	for _, ins := range message.Instructions {
+		var programID ag_solanago.PublicKey
+		if programID, err = message.Program(ins.ProgramIDIndex); err != nil {
+			return
+		}
+		if !programID.Equals(ProgramID) {
+			continue
+		}
+		var accounts []*ag_solanago.AccountMeta
+		if accounts, err = ins.ResolveInstructionAccounts(message); err != nil {
+			return
+		}
+		var insDecoded *Instruction
+		if insDecoded, err = decodeInstruction(accounts, ins.Data); err != nil {
+			return
+		}
+		instructions = append(instructions, insDecoded)
+	}
+	return
+}
+`))
+
 		files = append(files, &FileWrapper{
 			Name: "instructions",
 			File: file,
@@ -273,11 +298,16 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 		}
 	}
 
+	defs := make(map[string]IdlTypeDef)
 	{
-		file := NewGoFile(idl.Name, true)
+		file := NewGoFile(idl.Metadata.Name, true)
 		// Declare types from IDL:
 		for _, typ := range idl.Types {
-			file.Add(genTypeDef(&idl, false, typ))
+			defs[typ.Name] = typ
+			file.Add(genTypeDef(&idl, nil, IdlTypeDef{
+				Name: typ.Name,
+				Type: typ.Type,
+			}))
 		}
 		files = append(files, &FileWrapper{
 			Name: "types",
@@ -286,11 +316,17 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 	}
 
 	{
-		file := NewGoFile(idl.Name, true)
+		file := NewGoFile(idl.Metadata.Name, true)
 		// Declare account layouts from IDL:
 		for _, acc := range idl.Accounts {
-			// generate type definition:
-			file.Add(genTypeDef(&idl, GetConfig().TypeID == TypeIDAnchor, acc))
+			if _, ok := defs[acc.Name]; ok {
+				file.Add(genTypeDef(&idl, acc.Discriminator, IdlTypeDef{
+					Name: defs[acc.Name].Name + "Account",
+					Type: defs[acc.Name].Type,
+				}))
+			} else {
+				panic(`not implemented - only IDL from ("anchor": ">=0.30.0") is available`)
+			}
 		}
 		files = append(files, &FileWrapper{
 			Name: "accounts",
@@ -298,10 +334,215 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 		})
 	}
 
+	{
+		file := NewGoFile(idl.Metadata.Name, true)
+
+		// Declare account layouts from IDL:
+		for _, evt := range idl.Events {
+			if _, ok := defs[evt.Name]; ok {
+				eventDataTypeName := defs[evt.Name].Name + "EventData"
+				file.Add(genTypeDef(&idl, evt.Discriminator, IdlTypeDef{
+					Name: eventDataTypeName,
+					Type: defs[evt.Name].Type,
+				}))
+				file.Add(Func().Params(Op("*").Id(eventDataTypeName)).Id("isEventData").Params().Block())
+			} else {
+				panic(`not implemented - only IDL from ("anchor": ">=0.30.0") is available`)
+			}
+		}
+
+		file.Add(Empty().Var().Id("eventTypes").Op("=").Map(Index(Lit(8)).Byte()).Qual("reflect", "Type").Values(DictFunc(func(d Dict) {
+			for _, evt := range idl.Events {
+				if def, ok := defs[evt.Name]; ok {
+					d[Id(def.Name+"EventDataDiscriminator")] = Id("reflect.TypeOf(" + def.Name + "EventData{})")
+				}
+			}
+		})))
+
+		file.Add(Empty().Var().Id("eventNames").Op("=").Map(Index(Lit(8)).Byte()).String().Values(DictFunc(func(d Dict) {
+			for _, evt := range idl.Events {
+				if def, ok := defs[evt.Name]; ok {
+					d[Id(def.Name+"EventDataDiscriminator")] = Lit(def.Name)
+				}
+			}
+		})))
+
+		// TODO: refactor it
+		// to generate import statements
+		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("strings", "Builder").Op("=").Nil()))
+		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual("encoding/base64", "Encoding").Op("=").Nil()))
+		file.Add(Empty().Var().Defs(Id("_").Op("*").Qual(PkgDfuseBinary, "Decoder").Op("=").Nil())) // TODO: ..
+		file.Add(Empty().Id(`
+type Event struct {
+	Name string
+	Data EventData
+}
+
+type EventData interface {
+	UnmarshalWithDecoder(decoder *ag_binary.Decoder) error
+	isEventData()
+}
+
+const eventLogPrefix = "Program data: "
+
+func DecodeEvents(logMessages []string) (evts []*Event, err error) {
+	decoder := ag_binary.NewDecoderWithEncoding(nil, ag_binary.EncodingBorsh)
+	for _, log := range logMessages {
+		if strings.HasPrefix(log, eventLogPrefix) {
+			eventBase64 := log[len(eventLogPrefix):]
+
+			var eventBinary []byte
+			if eventBinary, err = base64.StdEncoding.DecodeString(eventBase64); err != nil {
+				return
+			}
+
+			eventDiscriminator := ag_binary.TypeID(eventBinary[:8])
+			if eventType, ok := eventTypes[eventDiscriminator]; ok {
+				eventData := reflect.New(eventType).Interface().(EventData)
+				decoder.Reset(eventBinary)
+				if err = eventData.UnmarshalWithDecoder(decoder); err != nil {
+					return
+				}
+				evts = append(evts, &Event{
+					Name: eventNames[eventDiscriminator],
+					Data: eventData,
+				})
+			}
+		}
+	}
+	return
+}
+`))
+
+		files = append(files, &FileWrapper{
+			Name: "events",
+			File: file,
+		})
+	}
+
+	{
+		// define custom errors
+		file := NewGoFile(idl.Metadata.Name, true)
+
+		// to generate import statements
+		file.Add(Var().Defs(
+			Id("_").Op("*").Qual("encoding/json", "Encoder").Op("=").Nil(),
+			Id("_").Op("*").Qual("github.com/gagliardetto/solana-go/rpc/jsonrpc", "RPCError").Op("=").Nil(),
+			Id("_").Qual("fmt", "Formatter").Op("=").Nil(),
+			Id("_").Op("=").Qual("errors", "ErrUnsupported"),
+		))
+
+		file.Add(Var().DefsFunc(func(group *Group) {
+			errDict := Dict{}
+			for _, errDef := range idl.Errors {
+				name := "Err" + ToCamel(errDef.Name)
+				group.Add(Id(name).Op("=").Op("&").Id("customErrorDef").Values(Dict{
+					Id("code"): Lit(errDef.Code),
+					Id("name"): Lit(errDef.Name),
+					Id("msg"):  Lit(errDef.Msg),
+				}))
+				errDict[Lit(errDef.Code)] = Id(name)
+			}
+			group.Add(Id("Errors").Op("=").Map(Int()).Id("CustomError").Values(errDict))
+		}))
+
+		file.Add(Empty().Id(`
+type CustomError interface {
+	Code() int
+	Name() string
+	Error() string
+}
+
+type customErrorDef struct {
+	code int
+	name string
+	msg  string
+}
+
+func (e *customErrorDef) Code() int {
+	return e.code
+}
+
+func (e *customErrorDef) Name() string {
+	return e.name
+}
+
+func (e *customErrorDef) Error() string {
+	return fmt.Sprintf("%s(%d): %s", e.name, e.code, e.msg)
+}
+
+func DecodeCustomError(rpcErr error) (err error, ok bool) {
+	if errCode, o := decodeErrorCode(rpcErr); o {
+		if customErr, o := Errors[errCode]; o {
+			err = customErr
+			ok = true
+			return
+		}
+	}
+	return
+}
+
+func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
+	var jErr *ag_jsonrpc.RPCError
+	if errors.As(rpcErr, &jErr) && jErr.Data != nil {
+		if root, o := jErr.Data.(map[string]interface{}); o {
+			if rootErr, o := root["err"].(map[string]interface{}); o {
+				if rootErrInstructionError, o := rootErr["InstructionError"]; o {
+					if rootErrInstructionErrorItems, o := rootErrInstructionError.([]interface{}); o {
+						if len(rootErrInstructionErrorItems) == 2 {
+							if v, o := rootErrInstructionErrorItems[1].(map[string]interface{}); o {
+								if v2, o := v["Custom"].(json.Number); o {
+									if code, err := v2.Int64(); err == nil {
+										ok = true
+										errorCode = int(code)
+									}
+								} else if v2, o := v["Custom"].(float64); o {
+									ok = true
+									errorCode = int(v2)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return
+}
+`))
+
+		files = append(files, &FileWrapper{
+			Name: "errors",
+			File: file,
+		})
+	}
+
 	// Instructions:
 	for _, instruction := range idl.Instructions {
-		file := NewGoFile(idl.Name, true)
+		file := NewGoFile(idl.Metadata.Name, true)
 		insExportedName := ToCamel(instruction.Name)
+		var args []IdlField
+		for _, arg := range instruction.Args {
+			idlFieldArg := IdlField{
+				Name: arg.Name,
+				Docs: arg.Docs,
+				Type: IdlType{
+					asString:         arg.Type.asString,
+					asIdlTypeVec:     arg.Type.asIdlTypeVec,
+					asIdlTypeOption:  arg.Type.asIdlTypeOption,
+					asIdlTypeArray:   arg.Type.asIdlTypeArray,
+					asIdlTypeDefined: nil,
+				},
+			}
+			if arg.Type.asIdlTypeDefined != nil {
+				idlFieldArg.Type.asIdlTypeDefined = &IdlTypeDefined{
+					Defined: IdLTypeDefinedName{
+						Name: arg.Type.asIdlTypeDefined.Defined.Name,
+					},
+				}
+			}
+			args = append(args, idlFieldArg)
+		}
 
 		// fmt.Println(RedBG(instruction.Name))
 
@@ -321,7 +562,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 			}
 
 			code.Type().Id(insExportedName).StructFunc(func(fieldsGroup *Group) {
-				for argIndex, arg := range instruction.Args {
+				for argIndex, arg := range args {
 					if len(arg.Docs) > 0 {
 						if argIndex > 0 {
 							fieldsGroup.Line()
@@ -369,11 +610,11 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 
 						comment.WriteString(Sf("[%v] = ", accountIndex))
 						comment.WriteString("[")
-						if ia.IsMut {
+						if ia.Writable {
 							comment.WriteString("WRITE")
 						}
-						if ia.IsSigner {
-							if ia.IsMut {
+						if ia.Signer {
+							if ia.Writable {
 								comment.WriteString(", ")
 							}
 							comment.WriteString("SIGNER")
@@ -416,7 +657,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 						Id("AccountMetaSlice").Op(":").Make(Qual(PkgSolanaGo, "AccountMetaSlice"), Lit(instruction.Accounts.NumAccounts())).Op(","),
 					)
 
-					// Set sysvar accounts:
+					// Set sysvar accounts and constant accounts:
 					instruction.Accounts.Walk("", nil, nil, func(parentGroupPath string, index int, parentGroup *IdlAccounts, account *IdlAccount) bool {
 						if isVar(account.Name) {
 							pureVarName := getSysVarName(account.Name)
@@ -427,17 +668,25 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 									panic(account)
 								}
 								def := Qual(PkgSolanaGo, "Meta").Call(Qual(PkgSolanaGo, pureVarName))
-								if account.IsMut {
+								if account.Writable {
 									def.Dot("WRITE").Call()
 								}
-								if account.IsSigner {
+								if account.Signer {
 									def.Dot("SIGNER").Call()
 								}
-
 								body.Id("nd").Dot("AccountMetaSlice").Index(Lit(index)).Op("=").Add(def)
 							} else {
 								panic(account)
 							}
+						} else if account.Address != "" {
+							def := Qual(PkgSolanaGo, "Meta").Call(Qual(PkgSolanaGo, "MustPublicKeyFromBase58").Call(Lit(account.Address)))
+							if account.Writable {
+								def.Dot("WRITE").Call()
+							}
+							if account.Signer {
+								def.Dot("SIGNER").Call()
+							}
+							body.Id("nd").Dot("AccountMetaSlice").Index(Lit(index)).Op("=").Add(def)
 						}
 						return true
 					})
@@ -450,7 +699,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 		{
 			// Declare methods that set the parameters of the instruction:
 			code := Empty()
-			for _, arg := range instruction.Args {
+			for _, arg := range args {
 				exportedArgName := ToCamel(arg.Name)
 
 				code.Line().Line()
@@ -580,6 +829,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 						groupMemberIndex,
 						exportedAccountName,
 						lowerAccountName,
+						instruction.Accounts,
 					))
 					groupMemberIndex++
 				}
@@ -719,11 +969,11 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 				).
 				BlockFunc(func(body *Group) {
 					// Body:
-					if len(instruction.Args) > 0 {
+					if len(args) > 0 {
 						body.Comment("Check whether all (required) parameters are set:")
 
 						body.BlockFunc(func(paramVerifyBody *Group) {
-							for _, arg := range instruction.Args {
+							for _, arg := range args {
 								exportedArgName := ToCamel(arg.Name)
 
 								// Optional params can be empty.
@@ -796,9 +1046,9 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 
 									instructionBranchGroup.Line().Comment("Parameters of the instruction:")
 
-									instructionBranchGroup.Id("instructionBranch").Dot("Child").Call(Lit(Sf("Params[len=%v]", len(instruction.Args)))).Dot("ParentFunc").Parens(Func().Parens(Id("paramsBranch").Qual(PkgTreeout, "Branches")).BlockFunc(func(paramsBranchGroup *Group) {
-										longest := treeFindLongestNameFromFields(instruction.Args)
-										for _, arg := range instruction.Args {
+									instructionBranchGroup.Id("instructionBranch").Dot("Child").Call(Lit(Sf("Params[len=%v]", len(args)))).Dot("ParentFunc").Parens(Func().Parens(Id("paramsBranch").Qual(PkgTreeout, "Branches")).BlockFunc(func(paramsBranchGroup *Group) {
+										longest := treeFindLongestNameFromFields(args)
+										for _, arg := range args {
 											exportedArgName := ToCamel(arg.Name)
 											paramsBranchGroup.Id("paramsBranch").Dot("Child").
 												Call(
@@ -841,7 +1091,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 					false,
 					insExportedName,
 					"",
-					instruction.Args,
+					args,
 					true,
 				),
 			)
@@ -855,7 +1105,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 					false,
 					insExportedName,
 					"",
-					instruction.Args,
+					args,
 					bin.TypeID{},
 				))
 		}
@@ -863,7 +1113,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 		{
 			// Declare instruction initializer func:
 			paramNames := []string{}
-			for _, arg := range instruction.Args {
+			for _, arg := range args {
 				paramNames = append(paramNames, arg.Name)
 			}
 			code := Empty()
@@ -875,7 +1125,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 					ListFunc(func(params *Group) {
 						// Parameters:
 						{
-							for argIndex, arg := range instruction.Args {
+							for argIndex, arg := range args {
 								paramNames = append(paramNames, arg.Name)
 								params.Add(func() Code {
 									if argIndex == 0 {
@@ -923,7 +1173,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 					// Body:
 					builder := body.Return().Id(formatBuilderFuncName(insExportedName)).Call()
 					{
-						for _, arg := range instruction.Args {
+						for _, arg := range args {
 							exportedArgName := ToCamel(arg.Name)
 							builder.Op(".").Line().Id("Set" + exportedArgName).Call(Id(arg.Name))
 						}
@@ -995,7 +1245,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 		}
 		////
 		files = append(files, &FileWrapper{
-			Name: insExportedName,
+			Name: strings.ToLower(insExportedName),
 			File: file,
 		})
 	}
@@ -1017,6 +1267,7 @@ func genAccountGettersSetters(
 	index int,
 	exportedAccountName string,
 	lowerAccountName string,
+	accounts []IdlAccountItem,
 ) Code {
 	code := Empty()
 
@@ -1027,6 +1278,7 @@ func genAccountGettersSetters(
 		for _, doc := range account.Docs {
 			code.Comment(doc).Line()
 		}
+
 		// Create account setters:
 		code.Func().Params(Id("inst").Op("*").Id(receiverTypeName)).Id(name).
 			Params(
@@ -1045,17 +1297,303 @@ func genAccountGettersSetters(
 				// Body:
 				def := Id("inst").Dot("AccountMetaSlice").Index(Lit(index)).
 					Op("=").Qual(PkgSolanaGo, "Meta").Call(Id(lowerAccountName))
-				if account.IsMut {
+				if account.Writable {
 					def.Dot("WRITE").Call()
 				}
-				if account.IsSigner {
+				if account.Signer {
 					def.Dot("SIGNER").Call()
 				}
-
 				body.Add(def)
 
 				body.Return().Id("inst")
 			})
+	}
+
+	{ // create PDA helper
+		/**
+		func (inst *FooInstruction) FindUserTokenAmountAccountAddress(user ag_solanago.PublicKey) (pda ag_solanago.PublicKey, bumpSeed uint8, err error) {
+			pda, bumpSeed, err = findUserTokenAmountAccountAddress(user, 0)
+			return
+		}
+
+		func (inst *FooInstruction) FindUserTokenAmountAccountAddress(user ag_solanago.PublicKey) (pda ag_solanago.PublicKey, bumpSeed uint8, err error) {
+			pda, bumpSeed, err = findUserTokenAmountAccountAddress(user, 0)
+			return
+		}
+
+		func (inst *FooInstruction) MustFindUserTokenAmountAccountAddress(user ag_solanago.PublicKey) (pda ag_solanago.PublicKey) {
+			pda, _, err := findUserTokenAmountAccountAddress(user)
+			if err != nil {
+				panic(err)
+			}
+			return
+		}
+
+		func (inst *FooInstruction) FindUserTokenAmountAccountAddress(user ag_solanago.PublicKey) (pda ag_solanago.PublicKey, bumpSeed uint8, err error) {
+			pda, bumpSeed, err = findUserTokenAmountAccountAddress(user, 0)
+			return
+		}
+
+		func (inst *FooInstruction) MustFindUserTokenAmountAccountAddressWithBumpSeed(user ag_solanago.PublicKey, bumpSeed uint8) (pda ag_solanago.PublicKey) {
+			pda, _, err := findUserTokenAmountAccountAddress(user, bumpSeed)
+			if err != nil {
+				panic(err)
+			}
+			return
+		}
+
+		func findUserTokenAmountAccountAddress(user ag_solanago.PublicKey, knownBumpSeed uint8) (pda ag_solanago.PublicKey, bumpSeed uint8, err error) {
+			var seeds [][]byte
+			seeds = append(seeds, []byte{1,2,3})
+			seeds = append(seeds, user.Bytes())
+			if knownBumpSeed != 0 {
+				seeds = append(seeds, []byte{byte(bumpSeed)})
+				pda, err = ag_solanago.CreateProgramAddress(seeds, ProgramID)
+			} else {
+				pda, bumpSeed, err = ag_solanago.FindProgramAddress(seeds, ProgramID)
+			}
+			return
+		}
+		*/
+		if account.PDA != nil {
+			code.Line().Line()
+			accessorName := strings.TrimSuffix(formatAccountAccessorName("Find", exportedAccountName), "Account") + "Address"
+
+			// find seeds
+			seedValues := make([][]byte, len(account.PDA.Seeds))
+			seedRefs := make([]string, len(account.PDA.Seeds))
+
+			var seedProgramValue *[]byte
+			if account.PDA.Program != nil {
+				if account.PDA.Program.Value == nil {
+					panic("cannot handle non-const type program value in PDA seeds")
+				}
+				seedProgramValue = &account.PDA.Program.Value
+			}
+
+		OUTER:
+			for i, seedDef := range account.PDA.Seeds {
+				if seedDef.Value != nil { // type: const
+					seedValues[i] = seedDef.Value
+				} else {
+					for _, acc := range accounts {
+						if acc.IdlAccount.Name == seedDef.Path {
+							seedRefs[i] = ToLowerCamel(acc.IdlAccount.Name)
+							continue OUTER
+						}
+					}
+					panic("cannot find related account path " + seedDef.Path)
+				}
+			}
+
+			internalAccessorName := "find" + accessorName
+			code.Func().Params(Id("inst").Op("*").Id(receiverTypeName)).Id(internalAccessorName).
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+							}
+						}
+						params.Id("knownBumpSeed").Uint8()
+					}),
+				).
+				Params(
+					ListFunc(func(results *Group) {
+						// Results:
+						results.Id("pda").Qual(PkgSolanaGo, "PublicKey")
+						results.Id("bumpSeed").Uint8()
+						results.Id("err").Error()
+					}),
+				).
+				BlockFunc(func(body *Group) {
+					// Body:
+					body.Add(Var().Id("seeds").Index().Index().Byte())
+
+					for i, seedValue := range seedValues {
+						if seedValue != nil {
+							body.Commentf("const: %s", string(seedValue))
+							body.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().ValuesFunc(func(group *Group) {
+								for _, v := range seedValue {
+									group.LitByte(v)
+								}
+							})))
+						} else {
+							seedRef := seedRefs[i]
+							body.Commentf("path: %s", seedRef)
+							body.Add(Id("seeds").Op("=").Append(Id("seeds"), Id(seedRef).Dot("Bytes").Call()))
+						}
+					}
+
+					body.Line()
+
+					seedProgramRef := Id("ProgramID")
+					if seedProgramValue != nil {
+						seedProgramRef = Id("programID")
+						body.Add(Id("programID").Op(":=").Qual(PkgSolanaGo, "PublicKey").Call(Index().Byte().ValuesFunc(func(group *Group) {
+							for _, v := range *seedProgramValue {
+								group.LitByte(v)
+							}
+						})))
+					}
+
+					body.Line()
+
+					body.Add(
+						If(Id("knownBumpSeed").Op("!=").Lit(0)).BlockFunc(func(group *Group) {
+							group.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().Values(Byte().Call(Id("bumpSeed")))))
+							group.Add(List(Id("pda"), Id("err")).Op("=").Add(Qual(PkgSolanaGo, "CreateProgramAddress").Call(Id("seeds"), seedProgramRef)))
+						}).
+							Else().BlockFunc(func(group *Group) {
+							group.Add(List(Id("pda"), Id("bumpSeed"), Id("err")).Op("=").Add(Qual(PkgSolanaGo, "FindProgramAddress").Call(Id("seeds"), seedProgramRef)))
+						}),
+					)
+
+					body.Return()
+				})
+
+			code.Line().Line()
+			accessorName2 := accessorName + "WithBumpSeed"
+			code.Commentf("%s calculates %s account address with given seeds and a known bump seed.", accessorName2, exportedAccountName).Line()
+			code.Func().Params(Id("inst").Op("*").Id(receiverTypeName)).Id(accessorName2).
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+							}
+						}
+						params.Id("bumpSeed").Uint8()
+					}),
+				).
+				Params(
+					ListFunc(func(results *Group) {
+						// Results:
+						results.Id("pda").Qual(PkgSolanaGo, "PublicKey")
+						results.Id("err").Error()
+					}),
+				).
+				BlockFunc(func(body *Group) {
+					body.Add(List(Id("pda"), Id("_"), Id("err")).Op("=").Id("inst").Dot(internalAccessorName).CallFunc(func(group *Group) {
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								group.Add(Id(seedRef))
+							}
+						}
+						group.Add(Id("bumpSeed"))
+						return
+					}))
+
+					body.Return()
+				})
+
+			code.Line().Line()
+			code.Func().Params(Id("inst").Op("*").Id(receiverTypeName)).Id("Must" + accessorName2).
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+							}
+						}
+						params.Id("bumpSeed").Uint8()
+					}),
+				).
+				Params(
+					ListFunc(func(results *Group) {
+						// Results:
+						results.Id("pda").Qual(PkgSolanaGo, "PublicKey")
+					}),
+				).
+				BlockFunc(func(body *Group) {
+					body.Add(List(Id("pda"), Id("_"), Id("err")).Op(":=").Id("inst").Dot(internalAccessorName).CallFunc(func(group *Group) {
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								group.Add(Id(seedRef))
+							}
+						}
+						group.Add(Id("bumpSeed"))
+						return
+					}))
+
+					body.Add(If(Id("err").Op("!=").Nil()).Block(Panic(Id("err"))))
+
+					body.Return()
+				})
+
+			code.Line().Line()
+			accessorName3 := accessorName
+			code.Commentf("%s finds %s account address with given seeds.", accessorName3, exportedAccountName).Line()
+			code.Func().Params(Id("inst").Op("*").Id(receiverTypeName)).Id(accessorName3).
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+							}
+						}
+					}),
+				).
+				Params(
+					ListFunc(func(results *Group) {
+						// Results:
+						results.Id("pda").Qual(PkgSolanaGo, "PublicKey")
+						results.Id("bumpSeed").Uint8()
+						results.Id("err").Error()
+					}),
+				).
+				BlockFunc(func(body *Group) {
+					body.Add(List(Id("pda"), Id("bumpSeed"), Id("err")).Op("=").Id("inst").Dot(internalAccessorName).CallFunc(func(group *Group) {
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								group.Add(Id(seedRef))
+							}
+						}
+						group.Add(Lit(0))
+						return
+					}))
+
+					body.Return()
+				})
+
+			code.Line().Line()
+			code.Func().Params(Id("inst").Op("*").Id(receiverTypeName)).Id("Must" + accessorName3).
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								params.Id(seedRef).Qual(PkgSolanaGo, "PublicKey")
+							}
+						}
+					}),
+				).
+				Params(
+					ListFunc(func(results *Group) {
+						// Results:
+						results.Id("pda").Qual(PkgSolanaGo, "PublicKey")
+					}),
+				).
+				BlockFunc(func(body *Group) {
+					body.Add(List(Id("pda"), Id("_"), Id("err")).Op(":=").Id("inst").Dot(internalAccessorName).CallFunc(func(group *Group) {
+						for _, seedRef := range seedRefs {
+							if seedRef != "" {
+								group.Add(Id(seedRef))
+							}
+						}
+						group.Add(Lit(0))
+						return
+					}))
+
+					body.Add(If(Id("err").Op("!=").Nil()).Block(Panic(Id("err"))))
+
+					body.Return()
+				})
+		}
 	}
 
 	{ // Create account getters:
@@ -1091,7 +1629,7 @@ func genAccountGettersSetters(
 }
 
 func genProgramBoilerplate(idl IDL) (*File, error) {
-	file := NewGoFile(idl.Name, true)
+	file := NewGoFile(idl.Metadata.Name, true)
 	for _, programDoc := range idl.Docs {
 		file.HeaderComment(programDoc)
 	}
@@ -1115,8 +1653,8 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 	{
 		// `SetProgramID` func:
 		code := Empty()
-		code.Func().Id("SetProgramID").Params(Id("pubkey").Qual(PkgSolanaGo, "PublicKey")).Block(
-			Id("ProgramID").Op("=").Id("pubkey"),
+		code.Func().Id("SetProgramID").Params(Id("PublicKey").Qual(PkgSolanaGo, "PublicKey")).Block(
+			Id("ProgramID").Op("=").Id("PublicKey"),
 			Qual(PkgSolanaGo, "RegisterInstructionDecoder").Call(Id("ProgramID"), Id("registryDecodeInstruction")),
 		)
 		file.Add(code.Line())
@@ -1124,7 +1662,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 	{
 		// ProgramName variable:
 		code := Empty()
-		programName := ToCamel(idl.Name)
+		programName := ToCamel(idl.Metadata.Name)
 		code.Const().Id("ProgramName").Op("=").Lit(programName)
 		file.Add(code.Line())
 	}
@@ -1205,6 +1743,9 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 								ins.Op("=").Qual(PkgDfuseBinary, "TypeID").Call(
 									Index(Lit(8)).Byte().Op("{").ListFunc(func(byteGroup *Group) {
 										sighash := bin.SighashTypeID(bin.SIGHASH_GLOBAL_NAMESPACE, toBeHashed)
+										if instruction.Discriminator != nil {
+											sighash = *instruction.Discriminator
+										}
 										for _, byteVal := range sighash[:] {
 											byteGroup.Lit(int(byteVal))
 										}
@@ -1384,7 +1925,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 											insName := sighash.ToSnakeForSighash(instruction.Name)
 											insExportedName := ToCamel(instruction.Name)
 											variantBlock.Block(
-												List(Lit(insName), Parens(Op("*").Id(insExportedName)).Parens(Nil())).Op(","),
+												List(Id("Name").Op(":").Lit(insName), Id("Type").Op(":").Parens(Op("*").Id(insExportedName)).Parens(Nil())).Op(","),
 											).Op(",")
 										}
 									}).Op(",").Line()
@@ -1587,7 +2128,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 				).
 				BlockFunc(func(body *Group) {
 					// Body:
-					body.List(Id("inst"), Err()).Op(":=").Id("DecodeInstruction").Call(Id("accounts"), Id("data"))
+					body.List(Id("inst"), Err()).Op(":=").Id("decodeInstruction").Call(Id("accounts"), Id("data"))
 
 					body.If(
 						Err().Op("!=").Nil(),
@@ -1601,7 +2142,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 		{
 			// `DecodeInstruction` func:
 			code := Empty()
-			code.Func().Id("DecodeInstruction").
+			code.Func().Id("decodeInstruction").
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:
@@ -1697,7 +2238,7 @@ func treeFindLongestNameFromAccounts(accounts IdlAccountItemSlice) (ln int) {
 func treeFormatAccountName(name string) string {
 	cleanedName := name
 	if isSysVar(name) {
-		cleanedName = strings.TrimSuffix(getSysVarName(name), "Pubkey")
+		cleanedName = strings.TrimSuffix(getSysVarName(name), "PublicKey")
 	}
 	if len(cleanedName) > len("account") {
 		if strings.HasSuffix(cleanedName, "account") {
