@@ -838,6 +838,64 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 
 			file.Add(code.Line())
 		}
+
+		{
+			// Add the remaining account information
+			code := Empty()
+			code.Comment("AppendRemainingAccounts")
+			code.Line().Func().Params(Id("inst").Op("*").Id(insExportedName)).Id("SetRemainingAccounts").
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						params.Id("metas").Op("[]*").Qual(PkgSolanaGo, "AccountMeta")
+					}),
+				).
+				Params(
+					ListFunc(func(results *Group) {
+						// Results:
+						results.Op("*").Id(insExportedName)
+					}),
+				).
+				BlockFunc(func(body *Group) {
+					body.Add(Id("inst").Dot("AccountMetaSlice").Op("=").Id("inst").Dot("AccountMetaSlice").Op(fmt.Sprintf(`[:%d]`, len(instruction.Accounts))))
+					body.Add(For(Id("_, meta").Op(":= range").Id("metas")).Block(
+						Id("inst").Dot("Append").Call(Id("meta")),
+					))
+
+					body.Return().Id("inst")
+				})
+
+			file.Add(code.Line())
+		}
+
+		{
+			// Get the remaining account information
+			code := Empty()
+
+			code.Comment("RemainingAccounts")
+			code.Line().Func().Params(Id("inst").Op("*").Id(insExportedName)).Id("GetRemainingAccounts").
+				Params(
+					ListFunc(func(params *Group) {
+
+					}),
+				).
+				Params(
+					ListFunc(func(params *Group) {
+						// Parameters:
+						params.Op("[]*").Qual(PkgSolanaGo, "AccountMeta")
+
+					}),
+				).
+				BlockFunc(func(body *Group) {
+
+					body.Return(
+						Id("inst").Dot("AccountMetaSlice").Op(fmt.Sprintf(`[%v:]`, len(instruction.Accounts))),
+					)
+				})
+
+			file.Add(code.Line())
+		}
+
 		{
 			// Declare `Build` method on instruction:
 			code := Empty()
