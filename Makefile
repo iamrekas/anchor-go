@@ -1,3 +1,6 @@
+build:
+	go build
+
 dummy:
 	go build && \
 	./anchor-go -src=./example/dummy_idl.json -pkg=dummy -dst=./generated/dummy && \
