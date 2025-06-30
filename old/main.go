@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +27,16 @@ const generatedDir = "generated"
 // - when printing tree, check for len before accessing array indexes.
 
 func main() {
+
+	defer func() {
+		if r := recover(); r != nil {
+			// s.log.Error("execTokenFallback recovered from panic",
+			// 	zap.Any("panic", r),
+			// 	zap.ByteString("stack", debug.Stack()))
+			fmt.Printf("recovered from panic: %v %s\n", r, debug.Stack())
+		}
+	}()
+
 	conf.Encoding = EncodingBorsh
 	conf.TypeID = TypeIDAnchor
 
@@ -121,10 +132,17 @@ func main() {
 			}
 		}
 
-		// spew.Dump(idl)
-
 		// Create subfolder for package for generated assets:
-		packageAssetFolderName := sighash.ToRustSnakeCase(idl.Metadata.Name)
+		var packageAssetFolderName string
+		if idl.Metadata == nil {
+			idl.Metadata = &IdlMetadata{}
+		}
+		if idl.Name != "" && idl.Metadata.Name == "" {
+			idl.Metadata.Name = idl.Name
+		} else {
+			panic("idl.Metadata.Name or idl.Name is empty")
+		}
+		packageAssetFolderName = sighash.ToRustSnakeCase(idl.Metadata.Name)
 		var dstDirForFiles string
 		if GetConfig().Debug {
 			packageAssetFolderPath := path.Join(GetConfig().DstDir, packageAssetFolderName)
@@ -221,6 +239,7 @@ func main() {
 				)
 				err = file.File.Render(goFile)
 				if err != nil {
+					fmt.Printf("Error while rendering file: %s\n", assetFilepath)
 					panic(err)
 				}
 			}
@@ -263,7 +282,7 @@ func GenerateClientFromProgramIDL(idl IDL) ([]*FileWrapper, error) {
 func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instruction, err error) {
 	for _, ins := range message.Instructions {
 		var programID ag_solanago.PublicKey
-		if programID, err = message.Program(ins.ProgramIDIndex); err != nil {
+		if programID, err = message.ResolveProgramIDIndex(ins.ProgramIDIndex); err != nil {
 			return
 		}
 		if !programID.Equals(ProgramID) {
@@ -274,7 +293,7 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 			return
 		}
 		var insDecoded *Instruction
-		if insDecoded, err = decodeInstruction(accounts, ins.Data); err != nil {
+		if insDecoded, err = DecodeInstruction(accounts, ins.Data); err != nil {
 			return
 		}
 		instructions = append(instructions, insDecoded)
@@ -304,7 +323,7 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 		// Declare types from IDL:
 		for _, typ := range idl.Types {
 			defs[typ.Name] = typ
-			file.Add(genTypeDef(&idl, nil, IdlTypeDef{
+			file.Add(genTypeDef(&idl, nil, false, IdlTypeDef{
 				Name: typ.Name,
 				Type: typ.Type,
 			}))
@@ -320,12 +339,18 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 		// Declare account layouts from IDL:
 		for _, acc := range idl.Accounts {
 			if _, ok := defs[acc.Name]; ok {
-				file.Add(genTypeDef(&idl, acc.Discriminator, IdlTypeDef{
+				file.Add(genTypeDef(&idl, acc.Discriminator, true, IdlTypeDef{
 					Name: defs[acc.Name].Name + "Account",
 					Type: defs[acc.Name].Type,
 				}))
 			} else {
-				panic(`not implemented - only IDL from ("anchor": ">=0.30.0") is available`)
+				file.Add(genTypeDef(&idl, acc.Discriminator, true, IdlTypeDef{
+					Name: acc.Name + "Account",
+					Type: acc.Type,
+				}))
+				// spew.Dump(acc.Name)
+				// spew.Dump(idl.Types)
+				// panic(`not implemented - only IDL from ("anchor": ">=0.30.0") is available`)
 			}
 		}
 		files = append(files, &FileWrapper{
@@ -341,13 +366,13 @@ func DecodeInstructions(message *ag_solanago.Message) (instructions []*Instructi
 		for _, evt := range idl.Events {
 			if _, ok := defs[evt.Name]; ok {
 				eventDataTypeName := defs[evt.Name].Name + "EventData"
-				file.Add(genTypeDef(&idl, evt.Discriminator, IdlTypeDef{
+				file.Add(genTypeDef(&idl, evt.Discriminator, false, IdlTypeDef{
 					Name: eventDataTypeName,
 					Type: defs[evt.Name].Type,
 				}))
 				file.Add(Func().Params(Op("*").Id(eventDataTypeName)).Id("isEventData").Params().Block())
 			} else {
-				panic(`not implemented - only IDL from ("anchor": ">=0.30.0") is available`)
+				fmt.Println(`"Events" not implemented - only IDL from ("anchor": ">=0.30.0") is available`)
 			}
 		}
 
@@ -386,7 +411,6 @@ type EventData interface {
 const eventLogPrefix = "Program data: "
 
 func DecodeEvents(logMessages []string) (evts []*Event, err error) {
-	decoder := ag_binary.NewDecoderWithEncoding(nil, ag_binary.EncodingBorsh)
 	for _, log := range logMessages {
 		if strings.HasPrefix(log, eventLogPrefix) {
 			eventBase64 := log[len(eventLogPrefix):]
@@ -399,7 +423,7 @@ func DecodeEvents(logMessages []string) (evts []*Event, err error) {
 			eventDiscriminator := ag_binary.TypeID(eventBinary[:8])
 			if eventType, ok := eventTypes[eventDiscriminator]; ok {
 				eventData := reflect.New(eventType).Interface().(EventData)
-				decoder.Reset(eventBinary)
+				decoder := ag_binary.NewDecoderWithEncoding(eventBinary, ag_binary.EncodingBorsh)
 				if err = eventData.UnmarshalWithDecoder(decoder); err != nil {
 					return
 				}
@@ -610,11 +634,11 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 
 						comment.WriteString(Sf("[%v] = ", accountIndex))
 						comment.WriteString("[")
-						if ia.Writable {
+						if ia.Writable || ia.IsMut {
 							comment.WriteString("WRITE")
 						}
-						if ia.Signer {
-							if ia.Writable {
+						if ia.Signer || ia.IsSigner {
+							if ia.Writable || ia.IsMut {
 								comment.WriteString(", ")
 							}
 							comment.WriteString("SIGNER")
@@ -668,10 +692,10 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 									panic(account)
 								}
 								def := Qual(PkgSolanaGo, "Meta").Call(Qual(PkgSolanaGo, pureVarName))
-								if account.Writable {
+								if account.Writable || account.IsMut {
 									def.Dot("WRITE").Call()
 								}
-								if account.Signer {
+								if account.Signer || account.IsSigner {
 									def.Dot("SIGNER").Call()
 								}
 								body.Id("nd").Dot("AccountMetaSlice").Index(Lit(index)).Op("=").Add(def)
@@ -680,10 +704,10 @@ func decodeErrorCode(rpcErr error) (errorCode int, ok bool) {
 							}
 						} else if account.Address != "" {
 							def := Qual(PkgSolanaGo, "Meta").Call(Qual(PkgSolanaGo, "MustPublicKeyFromBase58").Call(Lit(account.Address)))
-							if account.Writable {
+							if account.Writable || account.IsMut {
 								def.Dot("WRITE").Call()
 							}
-							if account.Signer {
+							if account.Signer || account.IsSigner {
 								def.Dot("SIGNER").Call()
 							}
 							body.Id("nd").Dot("AccountMetaSlice").Index(Lit(index)).Op("=").Add(def)
@@ -1355,10 +1379,10 @@ func genAccountGettersSetters(
 				// Body:
 				def := Id("inst").Dot("AccountMetaSlice").Index(Lit(index)).
 					Op("=").Qual(PkgSolanaGo, "Meta").Call(Id(lowerAccountName))
-				if account.Writable {
+				if account.Writable || account.IsMut {
 					def.Dot("WRITE").Call()
 				}
-				if account.Signer {
+				if account.Signer || account.IsSigner {
 					def.Dot("SIGNER").Call()
 				}
 				body.Add(def)
@@ -1440,7 +1464,8 @@ func genAccountGettersSetters(
 							continue OUTER
 						}
 					}
-					panic("cannot find related account path " + seedDef.Path)
+					seedRefs[i] = ToLowerCamel(seedDef.Path)
+					// panic("cannot find related account path " + seedDef.Path)
 				}
 			}
 
@@ -1471,7 +1496,12 @@ func genAccountGettersSetters(
 
 					for i, seedValue := range seedValues {
 						if seedValue != nil {
-							body.Commentf("const: %s", string(seedValue))
+							// Use hex representation for binary data to avoid UTF-8 encoding issues
+							hexStr := ""
+							for _, b := range seedValue {
+								hexStr += fmt.Sprintf("0x%02x,", b)
+							}
+							body.Commentf("const: [%s]", hexStr)
 							body.Add(Id("seeds").Op("=").Append(Id("seeds"), Index().Byte().ValuesFunc(func(group *Group) {
 								for _, v := range seedValue {
 									group.LitByte(v)
@@ -2186,7 +2216,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 				).
 				BlockFunc(func(body *Group) {
 					// Body:
-					body.List(Id("inst"), Err()).Op(":=").Id("decodeInstruction").Call(Id("accounts"), Id("data"))
+					body.List(Id("inst"), Err()).Op(":=").Id("DecodeInstruction").Call(Id("accounts"), Id("data"))
 
 					body.If(
 						Err().Op("!=").Nil(),
@@ -2200,7 +2230,7 @@ func genProgramBoilerplate(idl IDL) (*File, error) {
 		{
 			// `DecodeInstruction` func:
 			code := Empty()
-			code.Func().Id("decodeInstruction").
+			code.Func().Id("DecodeInstruction").
 				Params(
 					ListFunc(func(params *Group) {
 						// Parameters:

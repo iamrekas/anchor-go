@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/davecgh/go-spew/spew"
 	. "github.com/gagliardetto/utilz"
@@ -22,6 +23,7 @@ type IDL struct {
 
 	Address  string       `json:"address,omitempty"`
 	Metadata *IdlMetadata `json:"metadata,omitempty"` // NOTE: deprecated
+	Name     string       `json:"name,omitempty"`
 }
 
 // TODO: write generator
@@ -189,13 +191,16 @@ func (item *IdlAccountItem) UnmarshalJSON(data []byte) error {
 }
 
 type IdlAccount struct {
-	Docs     []string       `json:"docs"` // @custom
-	Name     string         `json:"name"`
-	Signer   bool           `json:"signer"`
-	Writable bool           `json:"writable"`
-	Optional bool           `json:"optional"`          // @custom
-	Address  string         `json:"address,omitempty"` // constant address
-	PDA      *idlAccountPDA `json:"pda,omitempty"`
+	Docs      []string       `json:"docs"` // @custom
+	Name      string         `json:"name"`
+	Signer    bool           `json:"signer"`
+	IsSigner  bool           `json:"isSigner"` // LAGACY
+	Writable  bool           `json:"writable"`
+	IsMut     bool           `json:"isMut"`             // LAGACY
+	Optional  bool           `json:"optional"`          // @custom
+	Address   string         `json:"address,omitempty"` // constant address
+	PDA       *idlAccountPDA `json:"pda,omitempty"`
+	Relations []string       `json:"relations,omitempty"` // Added relations field
 }
 
 type idlAccountPDA struct {
@@ -225,22 +230,23 @@ type IdlField struct {
 type IdlTypeAsString string
 
 const (
-	IdlTypeBool   IdlTypeAsString = "bool"
-	IdlTypeU8     IdlTypeAsString = "u8"
-	IdlTypeI8     IdlTypeAsString = "i8"
-	IdlTypeU16    IdlTypeAsString = "u16"
-	IdlTypeI16    IdlTypeAsString = "i16"
-	IdlTypeU32    IdlTypeAsString = "u32"
-	IdlTypeI32    IdlTypeAsString = "i32"
-	IdlTypeU64    IdlTypeAsString = "u64"
-	IdlTypeI64    IdlTypeAsString = "i64"
-	IdlTypeU128   IdlTypeAsString = "u128"
-	IdlTypeI128   IdlTypeAsString = "i128"
-	IdlTypeBytes  IdlTypeAsString = "bytes"
-	IdlTypeString IdlTypeAsString = "string"
-	IdlTypePubkey IdlTypeAsString = "pubkey"
-	IdlTypeF32    IdlTypeAsString = "f32"
-	IdlTypeF64    IdlTypeAsString = "f64"
+	IdlTypeBool      IdlTypeAsString = "bool"
+	IdlTypeU8        IdlTypeAsString = "u8"
+	IdlTypeI8        IdlTypeAsString = "i8"
+	IdlTypeU16       IdlTypeAsString = "u16"
+	IdlTypeI16       IdlTypeAsString = "i16"
+	IdlTypeU32       IdlTypeAsString = "u32"
+	IdlTypeI32       IdlTypeAsString = "i32"
+	IdlTypeU64       IdlTypeAsString = "u64"
+	IdlTypeI64       IdlTypeAsString = "i64"
+	IdlTypeU128      IdlTypeAsString = "u128"
+	IdlTypeI128      IdlTypeAsString = "i128"
+	IdlTypeBytes     IdlTypeAsString = "bytes"
+	IdlTypeString    IdlTypeAsString = "string"
+	IdlTypePubkey    IdlTypeAsString = "pubkey"
+	IdlTypePubkeyNew IdlTypeAsString = "publicKey"
+	IdlTypeF32       IdlTypeAsString = "f32"
+	IdlTypeF64       IdlTypeAsString = "f64"
 
 	// Custom additions:
 	IdlTypeUnixTimestamp IdlTypeAsString = "unixTimestamp"
@@ -314,12 +320,28 @@ func (env *IdlType) UnmarshalJSON(data []byte) error {
 				}
 				env.asIdlTypeOption = &target
 			}
-			if _, ok := v["defined"]; ok {
+			if val, ok := v["defined"]; ok {
 				var target IdlTypeDefined
-				if err := TranscodeJSON(temp, &target); err != nil {
+				err := TranscodeJSON(temp, &target)
+				if err == nil {
+					env.asIdlTypeDefined = &target
+				} else if _, ok := val.(string); ok {
+					if strings.Contains(val.(string), ":") || strings.Contains(val.(string), "usize") {
+						env.asIdlTypeDefined = &IdlTypeDefined{
+							Defined: IdLTypeDefinedName{
+								Name: "interface{}",
+							},
+						}
+					} else {
+						env.asIdlTypeDefined = &IdlTypeDefined{
+							Defined: IdLTypeDefinedName{
+								Name: val.(string),
+							},
+						}
+					}
+				} else {
 					return err
 				}
-				env.asIdlTypeDefined = &target
 			}
 			if got, ok := v["array"]; ok {
 
@@ -408,6 +430,7 @@ type IdlTypeDefTyKind string
 const (
 	IdlTypeDefTyKindStruct IdlTypeDefTyKind = "struct"
 	IdlTypeDefTyKindEnum   IdlTypeDefTyKind = "enum"
+	IdlTypeDefTyKindAlias  IdlTypeDefTyKind = "alias"
 )
 
 type IdlStructFieldSlice []IdlField

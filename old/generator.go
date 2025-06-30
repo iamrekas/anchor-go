@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strings"
+
 	. "github.com/dave/jennifer/jen"
 	"github.com/davecgh/go-spew/spew"
 	bin "github.com/gagliardetto/binary"
@@ -54,6 +56,8 @@ func typeStringToType(ts IdlTypeAsString) *Statement {
 	case IdlTypeString:
 		stat.String()
 	case IdlTypePubkey:
+		stat.Qual(PkgSolanaGo, "PublicKey")
+	case IdlTypePubkeyNew:
 		stat.Qual(PkgSolanaGo, "PublicKey")
 	case IdlTypeF32:
 		stat.Float32()
@@ -153,7 +157,7 @@ func registerComplexEnums(idl *IDL, def IdlTypeDef) {
 	}
 }
 
-func genTypeDef(idl *IDL, withDiscriminator *[8]byte, def IdlTypeDef) Code {
+func genTypeDef(idl *IDL, withDiscriminator *[8]byte, forceDiscriminator bool, def IdlTypeDef) Code {
 
 	st := newStatement()
 	switch def.Type.Kind {
@@ -190,16 +194,48 @@ func genTypeDef(idl *IDL, withDiscriminator *[8]byte, def IdlTypeDef) Code {
 				code := Empty()
 				exportedAccountName := ToCamel(def.Name)
 
-				//toBeHashed := ToCamel(def.Name)
+				toBeHashed := ToCamel(def.Name)
+				if strings.Contains(toBeHashed, "Account") {
+					toBeHashed = strings.TrimSuffix(toBeHashed, "Account")
+				}
 
 				if withDiscriminator != nil {
 					discriminatorName := exportedAccountName + "Discriminator"
-					//if GetConfig().Debug {
-					//	code.Comment(Sf(`hash("%s:%s")`, bin.SIGHASH_ACCOUNT_NAMESPACE, toBeHashed)).Line()
-					//}
-					//sighash := bin.SighashTypeID(bin.SIGHASH_ACCOUNT_NAMESPACE, toBeHashed)
 
 					sighash := bin.TypeID(*withDiscriminator)
+					code.Var().Id(discriminatorName).Op("=").Index(Lit(8)).Byte().Op("{").ListFunc(func(byteGroup *Group) {
+						for _, byteVal := range sighash[:] {
+							byteGroup.Lit(int(byteVal))
+						}
+					}).Op("}")
+
+					// Declare MarshalWithEncoder:
+					code.Line().Line().Add(
+						genMarshalWithEncoder_struct(
+							idl,
+							true,
+							exportedAccountName,
+							discriminatorName,
+							*def.Type.Fields,
+							true,
+						))
+
+					// Declare UnmarshalWithDecoder
+					code.Line().Line().Add(
+						genUnmarshalWithDecoder_struct(
+							idl,
+							true,
+							exportedAccountName,
+							discriminatorName,
+							*def.Type.Fields,
+							sighash,
+						))
+				} else if forceDiscriminator {
+					discriminatorName := exportedAccountName + "Discriminator"
+					if GetConfig().Debug {
+						code.Comment(Sf(`hash("%s:%s")`, bin.SIGHASH_ACCOUNT_NAMESPACE, toBeHashed)).Line()
+					}
+					sighash := bin.SighashTypeID(bin.SIGHASH_ACCOUNT_NAMESPACE, toBeHashed)
 					code.Var().Id(discriminatorName).Op("=").Index(Lit(8)).Byte().Op("{").ListFunc(func(byteGroup *Group) {
 						for _, byteVal := range sighash[:] {
 							byteGroup.Lit(int(byteVal))
@@ -442,7 +478,8 @@ func genTypeDef(idl *IDL, withDiscriminator *[8]byte, def IdlTypeDef) Code {
 
 		// panic(Sf("not implemented: %s", spew.Sdump(def)))
 	default:
-		panic(Sf("not implemented: %s", spew.Sdump(def.Type.Kind)))
+		// panic(Sf("not implemented: %s", spew.Sdump(def.Type.Kind)))
+		fmt.Printf("not implemented: %s\n", spew.Sdump(def.Type.Kind))
 	}
 	return st
 }
