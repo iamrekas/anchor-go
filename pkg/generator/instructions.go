@@ -822,8 +822,18 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 		argName := toCamelCase(arg.Name)
 		content.WriteString(fmt.Sprintf("\t// Serialize `%s` param:\n", argName))
 		if arg.Optional {
+			// AIDEV-NOTE: Fixed optional field encoding - write presence flag first
 			content.WriteString(fmt.Sprintf("\tif obj.%s != nil {\n", argName))
-			content.WriteString(fmt.Sprintf("\t\terr = encoder.Encode(obj.%s)\n", argName))
+			content.WriteString("\t\terr = encoder.WriteBool(true)\n")
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString(fmt.Sprintf("\t\terr = encoder.Encode(*obj.%s)\n", argName))
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString("\t} else {\n")
+			content.WriteString("\t\terr = encoder.WriteBool(false)\n")
 			content.WriteString("\t\tif err != nil {\n")
 			content.WriteString("\t\t\treturn err\n")
 			content.WriteString("\t\t}\n")
@@ -847,16 +857,28 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 		argName := toCamelCase(arg.Name)
 		content.WriteString(fmt.Sprintf("\t// Deserialize `%s`:\n", argName))
 		if arg.Optional {
-			content.WriteString(fmt.Sprintf("\tif obj.%s == nil {\n", argName))
-			content.WriteString(fmt.Sprintf("\t\tobj.%s = new(%s)\n", argName, g.generateFieldType(arg.Type, _idl)))
+			// AIDEV-NOTE: Fixed optional field decoding - read presence flag first
+			content.WriteString("\t{\n")
+			content.WriteString("\t\tok, err := decoder.ReadBool()\n")
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString("\t\tif ok {\n")
+			argType := g.generateFieldType(arg.Type, _idl)
+			content.WriteString(fmt.Sprintf("\t\t\ttmp := new(%s)\n", argType))
+			content.WriteString("\t\t\terr = decoder.Decode(tmp)\n")
+			content.WriteString("\t\t\tif err != nil {\n")
+			content.WriteString("\t\t\t\treturn err\n")
+			content.WriteString("\t\t\t}\n")
+			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = tmp\n", argName))
+			content.WriteString("\t\t}\n")
 			content.WriteString("\t}\n")
-			content.WriteString(fmt.Sprintf("\terr = decoder.Decode(obj.%s)\n", argName))
 		} else {
 			content.WriteString(fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", argName))
+			content.WriteString("\tif err != nil {\n")
+			content.WriteString("\t\treturn err\n")
+			content.WriteString("\t}\n")
 		}
-		content.WriteString("\tif err != nil {\n")
-		content.WriteString("\t\treturn err\n")
-		content.WriteString("\t}\n")
 	}
 
 	content.WriteString("\treturn nil\n")
@@ -1073,5 +1095,7 @@ func (g *InstructionsGenerator) mapBasicType(typeName string) string {
 
 // toSnakeCase converts a string to snake_case
 func toSnakeCase(s string) string {
-	return strings.ToLower(s)
+	// AIDEV-NOTE: Fixed to use proper snake_case conversion for variant names
+	// This must match the snake_case used in discriminator calculation
+	return sighash.ToSnakeForSighash(s)
 }

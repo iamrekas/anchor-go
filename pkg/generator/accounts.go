@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/iamrekas/anchor-go/pkg/idl"
+	"github.com/iamrekas/anchor-go/pkg/idl/types"
 )
 
 // calculateAccountDiscriminator calculates the discriminator for an account
@@ -285,17 +286,15 @@ func (g *AccountsGenerator) generateFieldType(t idl.Type, _idl idl.IDL) string {
 		return fmt.Sprintf("[%d]%s", arrayType.Size(), elemType)
 	} else if t.IsVector() {
 		// Handle vector types
-		vecType := t.(interface {
-			ElementType() idl.Type
-		})
-		elemType := g.generateFieldType(vecType.ElementType(), _idl)
+		// AIDEV-NOTE: VectorType has ElementType field, not method
+		vecType := t.(*types.VectorType)
+		elemType := g.generateFieldType(vecType.ElementType, _idl)
 		return fmt.Sprintf("[]%s", elemType)
 	} else if t.IsOption() {
 		// Handle option types
-		optType := t.(interface {
-			ElementType() idl.Type
-		})
-		elemType := g.generateFieldType(optType.ElementType(), _idl)
+		// AIDEV-NOTE: OptionType has ElementType field, not method
+		optType := t.(*types.OptionType)
+		elemType := g.generateFieldType(optType.ElementType, _idl)
 		return fmt.Sprintf("*%s", elemType)
 	} else if t.IsDefined() {
 		// Handle defined types

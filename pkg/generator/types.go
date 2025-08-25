@@ -204,7 +204,11 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 
 		// Generate field with type
 		fieldType := g.generateFieldType(field.Type)
-		if field.Optional {
+		// Check if the field type is already an option type (pointer)
+		if field.Type.IsOption() {
+			// Option types are already pointers, just add the bin:"optional" tag
+			code += fmt.Sprintf("\t%s %s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
+		} else if field.Optional {
 			code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
 		} else {
 			code += fmt.Sprintf("\t%s %s\n", toCamelCase(field.Name), fieldType)
@@ -260,6 +264,13 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\tif err != nil {\n")
 			code += fmt.Sprintf("\t\t\treturn err\n")
 			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t}\n")
+		} else if field.Type.IsOption() {
+			// Option types are handled by the encoder with bin:"optional" tag
+			code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
+			code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
+			code += fmt.Sprintf("\tif err != nil {\n")
+			code += fmt.Sprintf("\t\treturn err\n")
 			code += fmt.Sprintf("\t}\n")
 		} else if field.Optional {
 			code += fmt.Sprintf("\t// Serialize `%s` param (optional):\n", field.Name)
@@ -329,6 +340,13 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\tdefault:\n")
 			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"unknown enum index: %%v\", tmp.Enum)\n")
 			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t}\n")
+		} else if field.Type.IsOption() {
+			// Option types are handled by the decoder with bin:"optional" tag
+			code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
+			code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
+			code += fmt.Sprintf("\tif err != nil {\n")
+			code += fmt.Sprintf("\t\treturn err\n")
 			code += fmt.Sprintf("\t}\n")
 		} else if field.Optional {
 			code += fmt.Sprintf("\t// Deserialize `%s` (optional):\n", field.Name)
@@ -432,7 +450,11 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("type %s%sVariant struct {\n", typeDef.Name, variant.Name)
 			for _, field := range variant.Fields {
 				fieldType := g.generateFieldType(field.Type)
-				if field.Optional {
+				// Check if the field type is already an option type (pointer)
+				if field.Type.IsOption() {
+					// Option types are already pointers, just add the bin:"optional" tag
+					code += fmt.Sprintf("\t%s %s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
+				} else if field.Optional {
 					code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
 				} else {
 					code += fmt.Sprintf("\t%s %s\n", toCamelCase(field.Name), fieldType)
@@ -449,12 +471,34 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 					code += fmt.Sprintf("\terr = encoder.Encode(obj)\n")
 				} else {
 					fieldName := toCamelCase(field.Name)
-					code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
-					code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
+					if field.Type.IsOption() {
+						// For option types, we need to handle the optional serialization manually
+						code += fmt.Sprintf("\t// Serialize `%s` param (optional):\n", field.Name)
+						code += fmt.Sprintf("\t{\n")
+						code += fmt.Sprintf("\t\tif obj.%s == nil {\n", fieldName)
+						code += fmt.Sprintf("\t\t\terr = encoder.WriteBool(false)\n")
+						code += fmt.Sprintf("\t\t\tif err != nil {\n")
+						code += fmt.Sprintf("\t\t\t\treturn err\n")
+						code += fmt.Sprintf("\t\t\t}\n")
+						code += fmt.Sprintf("\t\t} else {\n")
+						code += fmt.Sprintf("\t\t\terr = encoder.WriteBool(true)\n")
+						code += fmt.Sprintf("\t\t\tif err != nil {\n")
+						code += fmt.Sprintf("\t\t\t\treturn err\n")
+						code += fmt.Sprintf("\t\t\t}\n")
+						code += fmt.Sprintf("\t\t\terr = encoder.Encode(obj.%s)\n", fieldName)
+						code += fmt.Sprintf("\t\t\tif err != nil {\n")
+						code += fmt.Sprintf("\t\t\t\treturn err\n")
+						code += fmt.Sprintf("\t\t\t}\n")
+						code += fmt.Sprintf("\t\t}\n")
+						code += fmt.Sprintf("\t}\n")
+					} else {
+						code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
+						code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
+						code += fmt.Sprintf("\tif err != nil {\n")
+						code += fmt.Sprintf("\t\treturn err\n")
+						code += fmt.Sprintf("\t}\n")
+					}
 				}
-				code += fmt.Sprintf("\tif err != nil {\n")
-				code += fmt.Sprintf("\t\treturn err\n")
-				code += fmt.Sprintf("\t}\n")
 			}
 			code += fmt.Sprintf("\treturn nil\n")
 			code += fmt.Sprintf("}\n\n")
@@ -468,12 +512,31 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 					code += fmt.Sprintf("\terr = decoder.Decode(obj)\n")
 				} else {
 					fieldName := toCamelCase(field.Name)
-					code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
-					code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
+					if field.Type.IsOption() {
+						// For option types, we need to handle the optional deserialization manually
+						code += fmt.Sprintf("\t// Deserialize `%s` (optional):\n", field.Name)
+						code += fmt.Sprintf("\t{\n")
+						code += fmt.Sprintf("\t\thasValue := false\n")
+						code += fmt.Sprintf("\t\terr = decoder.Decode(&hasValue)\n")
+						code += fmt.Sprintf("\t\tif err != nil {\n")
+						code += fmt.Sprintf("\t\t\treturn err\n")
+						code += fmt.Sprintf("\t\t}\n")
+						code += fmt.Sprintf("\t\tif hasValue {\n")
+						code += fmt.Sprintf("\t\t\tobj.%s = new(%s)\n", fieldName, g.generateFieldType(field.Type.(*types.OptionType).ElementType))
+						code += fmt.Sprintf("\t\t\terr = decoder.Decode(obj.%s)\n", fieldName)
+						code += fmt.Sprintf("\t\t\tif err != nil {\n")
+						code += fmt.Sprintf("\t\t\t\treturn err\n")
+						code += fmt.Sprintf("\t\t\t}\n")
+						code += fmt.Sprintf("\t\t}\n")
+						code += fmt.Sprintf("\t}\n")
+					} else {
+						code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
+						code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
+						code += fmt.Sprintf("\tif err != nil {\n")
+						code += fmt.Sprintf("\t\treturn err\n")
+						code += fmt.Sprintf("\t}\n")
+					}
 				}
-				code += fmt.Sprintf("\tif err != nil {\n")
-				code += fmt.Sprintf("\t\treturn err\n")
-				code += fmt.Sprintf("\t}\n")
 			}
 			code += fmt.Sprintf("\treturn nil\n")
 			code += fmt.Sprintf("}\n\n")
