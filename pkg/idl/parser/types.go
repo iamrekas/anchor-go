@@ -57,68 +57,86 @@ func ParseTypes(rawTypes []json.RawMessage, verbose bool) []types.TypeDef {
 
 		// Parse fields if it's a struct
 		if typeDef.Type.Kind == "struct" {
-			var fields []map[string]interface{}
-			if err := json.Unmarshal(typeDef.Type.Fields, &fields); err == nil && fields != nil {
-				for _, field := range fields {
-					name, _ := field["name"].(string)
-					docs, _ := field["docs"].([]string)
-					optional, _ := field["optional"].(bool)
-
-					// Validate field name is not empty
-					if name == "" {
-						// Get the raw JSON for the field
-						rawField, _ := json.Marshal(field)
-
-						if verbose {
-							fmt.Printf("Warning: Field with empty name detected in type '%s'\n", typeDef.Name)
-							fmt.Printf("JSON data: %s\n", string(rawField))
-						}
-						panic(fmt.Sprintf("Error: Field with empty name detected in type '%s'. JSON data: %s. Empty field names are not supported.",
-							typeDef.Name, string(rawField)))
-					}
-
-					// Validate field type is present
-					fieldType, ok := field["type"]
-					if !ok || fieldType == nil {
-						// Get the raw JSON for the field
-						rawField, _ := json.Marshal(field)
-
-						if verbose {
-							fmt.Printf("Warning: Field '%s' in type '%s' has no type definition\n", name, typeDef.Name)
-							fmt.Printf("JSON data: %s\n", string(rawField))
-						}
-						panic(fmt.Sprintf("Error: Field '%s' in type '%s' has no type definition. JSON data: %s. Fields must have a type.",
-							name, typeDef.Name, string(rawField)))
-					}
-
-					// Create a basic field
+			// AIDEV-NOTE: Handle both array of type names and array of field objects
+			// First try to unmarshal as array of strings (tuple-like struct)
+			var typeNames []string
+			if err := json.Unmarshal(typeDef.Type.Fields, &typeNames); err == nil && typeNames != nil {
+				// It's a tuple-like struct with just type names
+				for i, typeName := range typeNames {
+					// Create anonymous field with index-based name
 					fieldDef := types.Field{
-						Name:     name,
-						Docs:     docs,
-						Optional: optional,
-						Type:     &types.BasicType{TypeName: "string"}, // Default to string for now
+						Name:     fmt.Sprintf("field%d", i),
+						Docs:     []string{},
+						Optional: false,
+						Type:     &types.BasicType{TypeName: typeName},
 					}
-
-					// Use the helper function to parse the type
-					rawFieldType, _ := json.Marshal(fieldType)
-					parsedType, success := ParseFieldType(name, rawFieldType, verbose)
-					if success {
-						fieldDef.Type = parsedType
-
-						// Check if it's an option type to set the optional flag
-						if optType, ok := parsedType.(*types.OptionType); ok {
-							fieldDef.Optional = true
-							fieldDef.Type = optType
-						}
-					} else {
-						// If parsing failed, use string as fallback
-						if verbose {
-							fmt.Printf("Warning: Using string type as fallback for field '%s'\n", name)
-						}
-						fieldDef.Type = &types.BasicType{TypeName: "string"}
-					}
-
 					def.Fields = append(def.Fields, fieldDef)
+				}
+			} else {
+				// Try to unmarshal as array of field objects (regular struct)
+				var fields []map[string]interface{}
+				if err := json.Unmarshal(typeDef.Type.Fields, &fields); err == nil && fields != nil {
+					for _, field := range fields {
+						name, _ := field["name"].(string)
+						docs, _ := field["docs"].([]string)
+						optional, _ := field["optional"].(bool)
+
+						// Validate field name is not empty
+						if name == "" {
+							// Get the raw JSON for the field
+							rawField, _ := json.Marshal(field)
+
+							if verbose {
+								fmt.Printf("Warning: Field with empty name detected in type '%s'\n", typeDef.Name)
+								fmt.Printf("JSON data: %s\n", string(rawField))
+							}
+							panic(fmt.Sprintf("Error: Field with empty name detected in type '%s'. JSON data: %s. Empty field names are not supported.",
+								typeDef.Name, string(rawField)))
+						}
+
+						// Validate field type is present
+						fieldType, ok := field["type"]
+						if !ok || fieldType == nil {
+							// Get the raw JSON for the field
+							rawField, _ := json.Marshal(field)
+
+							if verbose {
+								fmt.Printf("Warning: Field '%s' in type '%s' has no type definition\n", name, typeDef.Name)
+								fmt.Printf("JSON data: %s\n", string(rawField))
+							}
+							panic(fmt.Sprintf("Error: Field '%s' in type '%s' has no type definition. JSON data: %s. Fields must have a type.",
+								name, typeDef.Name, string(rawField)))
+						}
+
+						// Create a basic field
+						fieldDef := types.Field{
+							Name:     name,
+							Docs:     docs,
+							Optional: optional,
+							Type:     &types.BasicType{TypeName: "string"}, // Default to string for now
+						}
+
+						// Use the helper function to parse the type
+						rawFieldType, _ := json.Marshal(fieldType)
+						parsedType, success := ParseFieldType(name, rawFieldType, verbose)
+						if success {
+							fieldDef.Type = parsedType
+
+							// Check if it's an option type to set the optional flag
+							if optType, ok := parsedType.(*types.OptionType); ok {
+								fieldDef.Optional = true
+								fieldDef.Type = optType
+							}
+						} else {
+							// If parsing failed, use string as fallback
+							if verbose {
+								fmt.Printf("Warning: Using string type as fallback for field '%s'\n", name)
+							}
+							fieldDef.Type = &types.BasicType{TypeName: "string"}
+						}
+
+						def.Fields = append(def.Fields, fieldDef)
+					}
 				}
 			}
 		}
