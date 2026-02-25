@@ -100,6 +100,10 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 	// Generate struct definition with Account suffix
 	code += fmt.Sprintf("type %sAccount struct {\n", account.Name)
 
+	// Track used field names to handle duplicates
+	// AIDEV-NOTE: Deduplicate field names by adding suffix when conflicts occur
+	usedFieldNames := make(map[string]int)
+
 	// Generate fields
 	for _, field := range account.Type.Fields {
 		if len(field.Docs) > 0 {
@@ -111,7 +115,18 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 		// Generate field with type
 		fieldType := g.generateFieldType(field.Type, _idl)
 		// Capitalize the first letter of the field name to make it public
-		fieldName := toCamelCase(field.Name)
+		baseFieldName := toCamelCase(field.Name)
+		
+		// Handle duplicate field names
+		fieldName := baseFieldName
+		if count, exists := usedFieldNames[baseFieldName]; exists {
+			// Add suffix for duplicate field names
+			fieldName = fmt.Sprintf("%s_%d", baseFieldName, count+1)
+			usedFieldNames[baseFieldName] = count + 1
+		} else {
+			usedFieldNames[baseFieldName] = 1
+		}
+		
 		if field.Optional {
 			code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", fieldName, fieldType)
 		} else {
@@ -157,9 +172,23 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 		code += fmt.Sprintf("\t}\n\n")
 	}
 
+	// Track used field names again for marshal method
+	// AIDEV-NOTE: Need to regenerate deduplicated names for marshal/unmarshal methods
+	marshalUsedNames := make(map[string]int)
+
 	// Marshal fields
 	for _, field := range account.Type.Fields {
-		fieldName := toCamelCase(field.Name)
+		baseFieldName := toCamelCase(field.Name)
+		
+		// Handle duplicate field names (same logic as struct generation)
+		fieldName := baseFieldName
+		if count, exists := marshalUsedNames[baseFieldName]; exists {
+			fieldName = fmt.Sprintf("%s_%d", baseFieldName, count+1)
+			marshalUsedNames[baseFieldName] = count + 1
+		} else {
+			marshalUsedNames[baseFieldName] = 1
+		}
+		
 		if field.Optional {
 			code += fmt.Sprintf("\t// Marshal optional field %s\n", field.Name)
 			code += fmt.Sprintf("\tif a.%s == nil {\n", fieldName)
@@ -201,9 +230,23 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 		code += fmt.Sprintf("\t}\n\n")
 	}
 
+	// Track used field names again for unmarshal method
+	// AIDEV-NOTE: Need to regenerate deduplicated names for unmarshal method
+	unmarshalUsedNames := make(map[string]int)
+
 	// Unmarshal fields
 	for _, field := range account.Type.Fields {
-		fieldName := toCamelCase(field.Name)
+		baseFieldName := toCamelCase(field.Name)
+		
+		// Handle duplicate field names (same logic as struct generation)
+		fieldName := baseFieldName
+		if count, exists := unmarshalUsedNames[baseFieldName]; exists {
+			fieldName = fmt.Sprintf("%s_%d", baseFieldName, count+1)
+			unmarshalUsedNames[baseFieldName] = count + 1
+		} else {
+			unmarshalUsedNames[baseFieldName] = 1
+		}
+		
 		if field.Optional {
 			code += fmt.Sprintf("\t// Unmarshal optional field %s\n", field.Name)
 			code += fmt.Sprintf("\thasValue, err := decoder.ReadBool()\n")

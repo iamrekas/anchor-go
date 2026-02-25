@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -156,6 +157,19 @@ func main() {
 					continue
 				}
 
+				// AIDEV-NOTE: Run goimports to fix imports and formatting
+				if err := runGoImports(fullPath); err != nil {
+					// If goimports fails, try gofmt as fallback
+					if verbose {
+						fmt.Printf("goimports failed, trying gofmt: %v\n", err)
+					}
+					if err := runGoFmt(fullPath); err != nil {
+						if verbose {
+							fmt.Printf("Warning: could not format %s: %v\n", fullPath, err)
+						}
+					}
+				}
+
 				if verbose {
 					fmt.Printf("Generated: %s\n", fullPath)
 				}
@@ -168,4 +182,26 @@ func main() {
 	} else {
 		fmt.Println("Code generation complete")
 	}
+}
+
+// runGoImports runs goimports on the specified file to fix imports and formatting
+// AIDEV-NOTE: Uses goimports to automatically add/remove imports and format code
+func runGoImports(filepath string) error {
+	cmd := exec.Command("goimports", "-w", filepath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("goimports failed: %v, output: %s", err, output)
+	}
+	return nil
+}
+
+// runGoFmt runs gofmt on the specified file to format the code
+// AIDEV-NOTE: Fallback formatter when goimports is not available
+func runGoFmt(filepath string) error {
+	cmd := exec.Command("gofmt", "-w", filepath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gofmt failed: %v, output: %s", err, output)
+	}
+	return nil
 }

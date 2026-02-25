@@ -194,6 +194,10 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 	// Generate struct definition
 	code += fmt.Sprintf("type %s struct {\n", typeDef.Name)
 
+	// Track used field names to handle duplicates
+	// AIDEV-NOTE: Deduplicate field names by adding suffix when conflicts occur
+	usedFieldNames := make(map[string]int)
+
 	// Generate fields
 	for _, field := range typeDef.Fields {
 		if len(field.Docs) > 0 {
@@ -204,14 +208,27 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 
 		// Generate field with type
 		fieldType := g.generateFieldType(field.Type)
+		// Capitalize the first letter of the field name to make it public
+		baseFieldName := toCamelCase(field.Name)
+		
+		// Handle duplicate field names
+		fieldName := baseFieldName
+		if count, exists := usedFieldNames[baseFieldName]; exists {
+			// Add suffix for duplicate field names
+			fieldName = fmt.Sprintf("%s_%d", baseFieldName, count+1)
+			usedFieldNames[baseFieldName] = count + 1
+		} else {
+			usedFieldNames[baseFieldName] = 1
+		}
+
 		// Check if the field type is already an option type (pointer)
 		if field.Type.IsOption() {
 			// Option types are already pointers, just add the bin:"optional" tag
-			code += fmt.Sprintf("\t%s %s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
+			code += fmt.Sprintf("\t%s %s `bin:\"optional\"`\n", fieldName, fieldType)
 		} else if field.Optional {
-			code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
+			code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", fieldName, fieldType)
 		} else {
-			code += fmt.Sprintf("\t%s %s\n", toCamelCase(field.Name), fieldType)
+			code += fmt.Sprintf("\t%s %s\n", fieldName, fieldType)
 		}
 	}
 
@@ -239,9 +256,22 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 		code += fmt.Sprintf("\t}\n\n")
 	}
 
+	// Track used field names again for marshal method
+	// AIDEV-NOTE: Need to regenerate deduplicated names for marshal/unmarshal methods
+	marshalUsedNames := make(map[string]int)
+
 	// Marshal fields
 	for _, field := range typeDef.Fields {
-		fieldName := toCamelCase(field.Name)
+		baseFieldName := toCamelCase(field.Name)
+		
+		// Handle duplicate field names (same logic as struct generation)
+		fieldName := baseFieldName
+		if count, exists := marshalUsedNames[baseFieldName]; exists {
+			fieldName = fmt.Sprintf("%s_%d", baseFieldName, count+1)
+			marshalUsedNames[baseFieldName] = count + 1
+		} else {
+			marshalUsedNames[baseFieldName] = 1
+		}
 
 		// Check if the field is a complex enum
 		if g.isComplexEnum(field.Type) {
@@ -313,16 +343,31 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 
 	// Track if hasValue has been declared for optional fields
 	hasOptionalField := false
+	
+	// Track used field names again for unmarshal method
+	// AIDEV-NOTE: Need to regenerate deduplicated names for unmarshal method
+	unmarshalUsedNames := make(map[string]int)
 
 	// Unmarshal fields
 	for _, field := range typeDef.Fields {
-		fieldName := toCamelCase(field.Name)
+		baseFieldName := toCamelCase(field.Name)
+
+		// Handle duplicate field names (same logic as struct generation)
+		fieldName := baseFieldName
+		if count, exists := unmarshalUsedNames[baseFieldName]; exists {
+			fieldName = fmt.Sprintf("%s_%d", baseFieldName, count+1)
+			unmarshalUsedNames[baseFieldName] = count + 1
+		} else {
+			unmarshalUsedNames[baseFieldName] = 1
+		}
+
+		// AIDEV-NOTE: Always check decoder.Remaining() to prevent panics when fields are missing
+		code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
+		code += fmt.Sprintf("\tif decoder.Remaining() > 0 {\n")
 
 		// Check if the field is a complex enum
 		if g.isComplexEnum(field.Type) {
 			typeName := field.Type.String()
-			code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
-			code += fmt.Sprintf("\t{\n")
 			code += fmt.Sprintf("\t\ttmp := new(%sContainer)\n", strings.ToLower(typeName))
 			code += fmt.Sprintf("\t\terr := decoder.Decode(tmp)\n")
 			code += fmt.Sprintf("\t\tif err != nil {\n")
@@ -340,40 +385,38 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\tdefault:\n")
 			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"unknown enum index: %%v\", tmp.Enum)\n")
 			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
 		} else if field.Type.IsOption() {
 			// Option types are handled by the decoder with bin:"optional" tag
-			code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
-			code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
-			code += fmt.Sprintf("\tif err != nil {\n")
-			code += fmt.Sprintf("\t\treturn err\n")
-			code += fmt.Sprintf("\t}\n")
+			code += fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", fieldName)
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t}\n")
 		} else if field.Optional {
-			code += fmt.Sprintf("\t// Deserialize `%s` (optional):\n", field.Name)
 			if !hasOptionalField {
 				// First optional field: use := to declare variables
-				code += fmt.Sprintf("\thasValue, err := decoder.ReadBool()\n")
+				code += fmt.Sprintf("\t\thasValue, err := decoder.ReadBool()\n")
 				hasOptionalField = true
 			} else {
 				// Subsequent optional fields: use = for assignment
-				code += fmt.Sprintf("\thasValue, err = decoder.ReadBool()\n")
+				code += fmt.Sprintf("\t\thasValue, err = decoder.ReadBool()\n")
 			}
-			code += fmt.Sprintf("\tif err != nil {\n")
-			code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to read optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t}\n")
-			code += fmt.Sprintf("\tif hasValue {\n")
-			code += fmt.Sprintf("\t\tobj.%s = new(%s)\n", fieldName, g.generateFieldType(field.Type))
-			code += fmt.Sprintf("\t\tif err := decoder.Decode(obj.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to read optional flag for %s: %%w\", err)\n", field.Name)
 			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
+			code += fmt.Sprintf("\t\tif hasValue {\n")
+			code += fmt.Sprintf("\t\t\tobj.%s = new(%s)\n", fieldName, g.generateFieldType(field.Type))
+			code += fmt.Sprintf("\t\t\tif err := decoder.Decode(obj.%s); err != nil {\n", fieldName)
+			code += fmt.Sprintf("\t\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\t\t}\n")
+			code += fmt.Sprintf("\t\t}\n")
 		} else {
-			code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
-			code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
-			code += fmt.Sprintf("\tif err != nil {\n")
-			code += fmt.Sprintf("\t\treturn err\n")
-			code += fmt.Sprintf("\t}\n")
+			code += fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", fieldName)
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t}\n")
 		}
+
+		code += fmt.Sprintf("\t}\n")
 	}
 
 	code += fmt.Sprintf("\treturn nil\n")
@@ -467,8 +510,9 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 			for _, field := range variant.Fields {
 				if field.Name == "" {
 					// Handle embedded type (unnamed field)
+					fieldType := g.generateFieldType(field.Type)
 					code += fmt.Sprintf("\t// Serialize embedded type:\n")
-					code += fmt.Sprintf("\terr = encoder.Encode(obj)\n")
+					code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldType)
 				} else {
 					fieldName := toCamelCase(field.Name)
 					if field.Type.IsOption() {
@@ -508,8 +552,9 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 			for _, field := range variant.Fields {
 				if field.Name == "" {
 					// Handle embedded type (unnamed field)
+					fieldType := g.generateFieldType(field.Type)
 					code += fmt.Sprintf("\t// Deserialize embedded type:\n")
-					code += fmt.Sprintf("\terr = decoder.Decode(obj)\n")
+					code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldType)
 				} else {
 					fieldName := toCamelCase(field.Name)
 					if field.Type.IsOption() {

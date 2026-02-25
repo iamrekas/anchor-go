@@ -63,7 +63,20 @@ func (g *InstructionsGenerator) generatePDACalculations(content *bytes.Buffer, i
 			// This is a constant seed PDA
 			accName := toCamelCase(account.Name)
 			content.WriteString(fmt.Sprintf("\t// Calculate and set %s PDA\n", account.Name))
-			content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress()\n", account.Name, accName))
+			
+			// AIDEV-NOTE: Handle PDA with external or const program
+			// Check if this PDA uses an external program (account-based only, const is embedded)
+			if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+				programParam := account.PDA.Program.Path
+				if strings.Contains(programParam, ".") {
+					programParam = strings.ReplaceAll(programParam, ".", "_")
+				}
+				content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress(%s)\n", account.Name, accName, programParam))
+			} else {
+				// For const program or no program specified
+				content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress()\n", account.Name, accName))
+			}
+			
 			content.WriteString("\tif err != nil {\n")
 			content.WriteString(fmt.Sprintf("\t\treturn nil, fmt.Errorf(\"failed to find %s address: %%w\", err)\n", account.Name))
 			content.WriteString("\t}\n")
@@ -120,7 +133,31 @@ func (g *InstructionsGenerator) generatePDACalculations(content *bytes.Buffer, i
 			// All seeds are available as arguments
 			accName := toCamelCase(account.Name)
 			content.WriteString(fmt.Sprintf("\t// Calculate and set %s PDA\n", account.Name))
-			content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress(%s)\n", account.Name, accName, strings.Join(seedParams, ", ")))
+			
+			// AIDEV-NOTE: Include program parameter only for account-based programs
+			// Check if this PDA uses an external program account and add it to params
+			// Skip if already present in seedParams (dedup with seed parameters)
+			allParams := make([]string, 0)
+			allParams = append(allParams, seedParams...)
+			if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+				programParam := account.PDA.Program.Path
+				if strings.Contains(programParam, ".") {
+					programParam = strings.ReplaceAll(programParam, ".", "_")
+				}
+				alreadyPresent := false
+				for _, p := range allParams {
+					if p == programParam {
+						alreadyPresent = true
+						break
+					}
+				}
+				if !alreadyPresent {
+					allParams = append(allParams, programParam)
+				}
+			}
+			// Note: const program IDs are embedded in the Find method itself
+
+			content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress(%s)\n", account.Name, accName, strings.Join(allParams, ", ")))
 			content.WriteString("\tif err != nil {\n")
 			content.WriteString(fmt.Sprintf("\t\treturn nil, fmt.Errorf(\"failed to find %s address: %%w\", err)\n", account.Name))
 			content.WriteString("\t}\n")
@@ -188,7 +225,31 @@ func (g *InstructionsGenerator) generatePDACalculations(content *bytes.Buffer, i
 				// All seeds are available, so we can calculate the PDA
 				accName := toCamelCase(account.Name)
 				content.WriteString(fmt.Sprintf("\t// Calculate and set %s PDA\n", account.Name))
-				content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress(%s)\n", account.Name, accName, strings.Join(seedParams, ", ")))
+				
+				// AIDEV-NOTE: Include program parameter for dependent PDAs (account-based only)
+				// Check if this PDA uses an external program account and add it to params
+				// Skip if already present in seedParams (dedup with seed parameters)
+				allParams := make([]string, 0)
+				allParams = append(allParams, seedParams...)
+				if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+					programParam := account.PDA.Program.Path
+					if strings.Contains(programParam, ".") {
+						programParam = strings.ReplaceAll(programParam, ".", "_")
+					}
+					alreadyPresent := false
+					for _, p := range allParams {
+						if p == programParam {
+							alreadyPresent = true
+							break
+						}
+					}
+					if !alreadyPresent {
+						allParams = append(allParams, programParam)
+					}
+				}
+				// Note: const program IDs are embedded in the Find method itself
+				
+				content.WriteString(fmt.Sprintf("\t%sPDA, _, err := nd.Find%sAddress(%s)\n", account.Name, accName, strings.Join(allParams, ", ")))
 				content.WriteString("\tif err != nil {\n")
 				content.WriteString(fmt.Sprintf("\t\treturn nil, fmt.Errorf(\"failed to find %s address: %%w\", err)\n", account.Name))
 				content.WriteString("\t}\n")

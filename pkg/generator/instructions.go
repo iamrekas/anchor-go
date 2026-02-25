@@ -364,58 +364,21 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	// Add imports
 	content.WriteString("import (\n")
 	content.WriteString("\t\"errors\"\n")
-
-	// Check if we need fmt package
-	needsFmt := false
-	fmtUsageReasons := make([]string, 0)
-
-	// Check if any accounts are PDAs (which use fmt for error formatting)
-	// and if those PDAs are actually used in the New<Instruction>Instruction function
+	
+	// AIDEV-NOTE: Always include fmt when PDAs exist, goimports will remove if unused
+	// Check if any accounts are PDAs (which might use fmt for error formatting)
+	hasPDAs := false
 	for _, acc := range instr.Accounts {
 		if acc.IsAccount() {
 			account, ok := acc.(*idl.Account)
 			if ok && account.PDA != nil && len(account.PDA.Seeds) > 0 {
-				// Check if all seed accounts are available as parameters
-				allSeedsAvailable := true
-				for _, seed := range account.PDA.Seeds {
-					if seed.Kind == "account" {
-						// Check if this seed account is a parameter
-						seedFound := false
-						for _, reqAcc := range instr.Accounts {
-							if reqAcc.IsAccount() {
-								reqAccount, ok := reqAcc.(*idl.Account)
-								if ok && reqAccount.Name == seed.Path {
-									seedFound = true
-									break
-								}
-							}
-						}
-						if !seedFound {
-							allSeedsAvailable = false
-							break
-						}
-					}
-				}
-				// If all seeds are available, we'll need fmt for error formatting
-				if allSeedsAvailable {
-					needsFmt = true
-					fmtUsageReasons = append(fmtUsageReasons, fmt.Sprintf("PDA calculation for account %s", account.Name))
-					break
-				}
+				hasPDAs = true
+				break
 			}
 		}
 	}
 
-	// Log fmt usage if verbose
-	if g.config.Verbose {
-		if needsFmt {
-			fmt.Printf("Instruction %s: Including fmt package for reasons: %v\n", instrName, fmtUsageReasons)
-		} else {
-			fmt.Printf("Instruction %s: Not including fmt package\n", instrName)
-		}
-	}
-
-	if needsFmt {
+	if hasPDAs {
 		content.WriteString("\t\"fmt\"\n")
 	}
 
@@ -548,6 +511,9 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 
 				// Add parameters for each seed
 				seedParams := make([]string, 0)
+				paramNameCount := make(map[string]int) // Track parameter name occurrences
+				uniqueParamNames := make([]string, 0)  // Store unique names in order
+
 				for _, seed := range account.PDA.Seeds {
 					if seed.Kind == "account" {
 						paramName := seed.Path
@@ -555,9 +521,38 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 						if strings.Contains(paramName, ".") {
 							paramName = strings.ReplaceAll(paramName, ".", "_")
 						}
-						seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", paramName))
+
+						// Check if this parameter name has been used before
+						if count, exists := paramNameCount[paramName]; exists {
+							// Increment count and add suffix
+							paramNameCount[paramName] = count + 1
+							uniqueParamName := fmt.Sprintf("%s%d", paramName, count+1)
+							uniqueParamNames = append(uniqueParamNames, uniqueParamName)
+							seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", uniqueParamName))
+						} else {
+							// First occurrence, no suffix needed
+							paramNameCount[paramName] = 1
+							uniqueParamNames = append(uniqueParamNames, paramName)
+							seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", paramName))
+						}
 					}
 				}
+
+				// AIDEV-NOTE: Add program parameter only if PDA uses account-based program
+				// Add program parameter if PDA.Program is specified and is an account (not const)
+				// Skip if already present as a seed parameter (dedup)
+				if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+					programParam := account.PDA.Program.Path
+					if strings.Contains(programParam, ".") {
+						programParam = strings.ReplaceAll(programParam, ".", "_")
+					}
+					if _, exists := paramNameCount[programParam]; !exists {
+						paramNameCount[programParam] = 1
+						uniqueParamNames = append(uniqueParamNames, programParam)
+						seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", programParam))
+					}
+				}
+				// Note: const program IDs don't need parameters as they're embedded
 
 				// Add knownBumpSeed parameter
 				seedParams = append(seedParams, "knownBumpSeed uint8")
@@ -567,7 +562,8 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 				// Generate seeds array
 				content.WriteString("\tvar seeds [][]byte\n")
 
-				// Add each seed
+				// Add each seed using the unique parameter names
+				seedIdx := 0
 				for _, seed := range account.PDA.Seeds {
 					if seed.Kind == "const" {
 						// Add constant seed
@@ -606,24 +602,63 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 						// Add account seed
 						content.WriteString(fmt.Sprintf("\t// path: %s\n", seed.Path))
 
-						// Handle paths with dots (e.g., "pool.coin_creator")
-						seedPath := seed.Path
-						if strings.Contains(seedPath, ".") {
-							paramName := strings.ReplaceAll(seedPath, ".", "_")
-							content.WriteString(fmt.Sprintf("\tseeds = append(seeds, %s.Bytes())\n", paramName))
-						} else {
-							content.WriteString(fmt.Sprintf("\tseeds = append(seeds, %s.Bytes())\n", seedPath))
-						}
+						// Use the unique parameter name from the array we built earlier
+						uniqueParamName := uniqueParamNames[seedIdx]
+						content.WriteString(fmt.Sprintf("\tseeds = append(seeds, %s.Bytes())\n", uniqueParamName))
+						seedIdx++
 					}
 				}
 
-				// Add logic to find PDA
-				content.WriteString("\n\tif knownBumpSeed != 0 {\n")
-				content.WriteString("\t\tseeds = append(seeds, []byte{byte(knownBumpSeed)})\n")
-				content.WriteString("\t\tpda, err = ag_solanago.CreateProgramAddress(seeds, ProgramID)\n")
-				content.WriteString("\t} else {\n")
-				content.WriteString("\t\tpda, bumpSeed, err = ag_solanago.FindProgramAddress(seeds, ProgramID)\n")
-				content.WriteString("\t}\n")
+				// AIDEV-NOTE: Handle PDA program field - support both account and const types
+				// Determine which program ID to use for PDA derivation
+				if account.PDA.Program != nil {
+					if account.PDA.Program.Kind == "account" {
+						// Use the specified program account
+						programParam := account.PDA.Program.Path
+						if strings.Contains(programParam, ".") {
+							programParam = strings.ReplaceAll(programParam, ".", "_")
+						}
+						content.WriteString(fmt.Sprintf("\n\t// Using program from account: %s\n", account.PDA.Program.Path))
+						content.WriteString("\n\tif knownBumpSeed != 0 {\n")
+						content.WriteString("\t\tseeds = append(seeds, []byte{byte(knownBumpSeed)})\n")
+						content.WriteString(fmt.Sprintf("\t\tpda, err = ag_solanago.CreateProgramAddress(seeds, %s)\n", programParam))
+						content.WriteString("\t} else {\n")
+						content.WriteString(fmt.Sprintf("\t\tpda, bumpSeed, err = ag_solanago.FindProgramAddress(seeds, %s)\n", programParam))
+						content.WriteString("\t}\n")
+					} else if account.PDA.Program.Kind == "const" {
+						// Use the constant program ID
+						content.WriteString("\n\t// Using constant program ID\n")
+						content.WriteString("\tprogramID := ag_solanago.PublicKey{\n")
+						for i, b := range account.PDA.Program.Value {
+							if i%8 == 0 {
+								content.WriteString("\t\t")
+							}
+							content.WriteString(fmt.Sprintf("byte(0x%02x)", b))
+							if i < len(account.PDA.Program.Value)-1 {
+								content.WriteString(", ")
+								if (i+1)%8 == 0 {
+									content.WriteString("\n")
+								}
+							}
+						}
+						content.WriteString(",\n\t}\n")
+						content.WriteString("\n\tif knownBumpSeed != 0 {\n")
+						content.WriteString("\t\tseeds = append(seeds, []byte{byte(knownBumpSeed)})\n")
+						content.WriteString("\t\tpda, err = ag_solanago.CreateProgramAddress(seeds, programID)\n")
+						content.WriteString("\t} else {\n")
+						content.WriteString("\t\tpda, bumpSeed, err = ag_solanago.FindProgramAddress(seeds, programID)\n")
+						content.WriteString("\t}\n")
+					}
+				} else {
+					// Use the default ProgramID
+					content.WriteString("\n\t// Using default ProgramID\n")
+					content.WriteString("\tif knownBumpSeed != 0 {\n")
+					content.WriteString("\t\tseeds = append(seeds, []byte{byte(knownBumpSeed)})\n")
+					content.WriteString("\t\tpda, err = ag_solanago.CreateProgramAddress(seeds, ProgramID)\n")
+					content.WriteString("\t} else {\n")
+					content.WriteString("\t\tpda, bumpSeed, err = ag_solanago.FindProgramAddress(seeds, ProgramID)\n")
+					content.WriteString("\t}\n")
+				}
 				content.WriteString("\treturn\n")
 				content.WriteString("}\n\n")
 
@@ -631,21 +666,35 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 				content.WriteString(fmt.Sprintf("// Find%sAddressWithBumpSeed calculates %s account address with given seeds and a known bump seed.\n", accName, accName))
 				content.WriteString(fmt.Sprintf("func (inst *%s) Find%sAddressWithBumpSeed(", instrName, accName))
 
-				// Add parameters for each seed
-				var seedParamsWithoutType []string
+				// Reuse the unique parameter names from earlier
 				seedParams = make([]string, 0)
-				seedParamsWithoutType = make([]string, 0)
-				for _, seed := range account.PDA.Seeds {
-					if seed.Kind == "account" {
-						paramName := seed.Path
-						// Handle paths with dots (e.g., "pool.coin_creator")
-						if strings.Contains(paramName, ".") {
-							paramName = strings.ReplaceAll(paramName, ".", "_")
+				seedParamsWithoutType := make([]string, 0)
+				for _, uniqueName := range uniqueParamNames {
+					seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", uniqueName))
+					seedParamsWithoutType = append(seedParamsWithoutType, uniqueName)
+				}
+
+				// AIDEV-NOTE: Add program parameter only for account-based PDA programs
+				// Add program parameter if PDA.Program is specified and is an account (not const)
+				// Skip if already present as a seed parameter (dedup)
+				if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+					programParam := account.PDA.Program.Path
+					if strings.Contains(programParam, ".") {
+						programParam = strings.ReplaceAll(programParam, ".", "_")
+					}
+					alreadyPresent := false
+					for _, name := range uniqueParamNames {
+						if name == programParam {
+							alreadyPresent = true
+							break
 						}
-						seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", paramName))
-						seedParamsWithoutType = append(seedParamsWithoutType, paramName)
+					}
+					if !alreadyPresent {
+						seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", programParam))
+						seedParamsWithoutType = append(seedParamsWithoutType, programParam)
 					}
 				}
+				// Note: const program IDs are embedded directly in the method
 
 				// Add bumpSeed parameter
 				seedParams = append(seedParams, "bumpSeed uint8")
@@ -670,31 +719,46 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 				// Generate Find method
 				content.WriteString(fmt.Sprintf("// Find%sAddress finds %s account address with given seeds.\n", accName, accName))
 
-				// Add parameters for each seed
-				seedParamsWithoutType = make([]string, 0)
+				// Reuse the unique parameter names for Find method too
 				seedParams = make([]string, 0)
-				for _, seed := range account.PDA.Seeds {
-					if seed.Kind == "account" {
-						paramName := seed.Path
-						// Handle paths with dots (e.g., "pool.coin_creator")
-						if strings.Contains(paramName, ".") {
-							paramName = strings.ReplaceAll(paramName, ".", "_")
+				seedParamsWithoutType = make([]string, 0)
+				for _, uniqueName := range uniqueParamNames {
+					seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", uniqueName))
+					seedParamsWithoutType = append(seedParamsWithoutType, uniqueName)
+				}
+
+				// AIDEV-NOTE: Add program parameter for Find methods (account-based only)
+				// Add program parameter if PDA.Program is specified and is an account (not const)
+				// Skip if already present as a seed parameter (dedup)
+				if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+					programParam := account.PDA.Program.Path
+					if strings.Contains(programParam, ".") {
+						programParam = strings.ReplaceAll(programParam, ".", "_")
+					}
+					alreadyPresent := false
+					for _, name := range uniqueParamNames {
+						if name == programParam {
+							alreadyPresent = true
+							break
 						}
-						seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", paramName))
-						seedParamsWithoutType = append(seedParamsWithoutType, paramName)
+					}
+					if !alreadyPresent {
+						seedParams = append(seedParams, fmt.Sprintf("%s ag_solanago.PublicKey", programParam))
+						seedParamsWithoutType = append(seedParamsWithoutType, programParam)
 					}
 				}
+				// Note: const program IDs are embedded directly in the method
 
 				content.WriteString(fmt.Sprintf("func (inst *%s) Find%sAddress(", instrName, accName))
 				content.WriteString(strings.Join(seedParams, ", "))
 				content.WriteString(") (pda ag_solanago.PublicKey, bumpSeed uint8, err error) {\n")
 
+				// AIDEV-NOTE: Pass all parameters including program if specified
 				// Handle the case where there are no account seeds
-				if len(seedParamsWithoutType) > 0 {
-					content.WriteString(fmt.Sprintf("\tpda, bumpSeed, err = inst.findFind%sAddress(%s, 0)\n", accName, strings.Join(seedParamsWithoutType, ", ")))
-				} else {
-					content.WriteString(fmt.Sprintf("\tpda, bumpSeed, err = inst.findFind%sAddress(0)\n", accName))
-				}
+				allParams := make([]string, 0)
+				allParams = append(allParams, seedParamsWithoutType...)
+				allParams = append(allParams, "0") // bump seed
+				content.WriteString(fmt.Sprintf("\tpda, bumpSeed, err = inst.findFind%sAddress(%s)\n", accName, strings.Join(allParams, ", ")))
 
 				content.WriteString("\treturn\n")
 				content.WriteString("}\n\n")
@@ -704,12 +768,12 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 				content.WriteString(strings.Join(seedParams, ", "))
 				content.WriteString(") (pda ag_solanago.PublicKey) {\n")
 
+				// AIDEV-NOTE: Pass all parameters including program if specified for MustFind too
 				// Handle the case where there are no account seeds
-				if len(seedParamsWithoutType) > 0 {
-					content.WriteString(fmt.Sprintf("\tpda, _, err := inst.findFind%sAddress(%s, 0)\n", accName, strings.Join(seedParamsWithoutType, ", ")))
-				} else {
-					content.WriteString(fmt.Sprintf("\tpda, _, err := inst.findFind%sAddress(0)\n", accName))
-				}
+				allParams2 := make([]string, 0)
+				allParams2 = append(allParams2, seedParamsWithoutType...)
+				allParams2 = append(allParams2, "0") // bump seed
+				content.WriteString(fmt.Sprintf("\tpda, _, err := inst.findFind%sAddress(%s)\n", accName, strings.Join(allParams2, ", ")))
 
 				content.WriteString("\tif err != nil {\n")
 				content.WriteString("\t\tpanic(err)\n")
@@ -795,7 +859,12 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 
 	// Parameters section
 	content.WriteString("\t\t\t\t\t// Parameters of the instruction:\n")
-	content.WriteString(fmt.Sprintf("\t\t\t\t\tinstructionBranch.Child(\"Params[len=%d]\").ParentFunc(func(paramsBranch ag_treeout.Branches) {})\n\n", len(instr.Args)))
+	content.WriteString(fmt.Sprintf("\t\t\t\t\tinstructionBranch.Child(\"Params[len=%d]\").ParentFunc(func(paramsBranch ag_treeout.Branches) {\n", len(instr.Args)))
+	for _, arg := range instr.Args {
+		argName := toCamelCase(arg.Name)
+		content.WriteString(fmt.Sprintf("\t\t\t\t\t\tparamsBranch.Child(ag_format.Param(\"%s\", inst.%s))\n", arg.Name, argName))
+	}
+	content.WriteString("\t\t\t\t\t})\n\n")
 
 	// Accounts section
 	content.WriteString("\t\t\t\t\t// Accounts of the instruction:\n")
@@ -856,9 +925,9 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	for _, arg := range instr.Args {
 		argName := toCamelCase(arg.Name)
 		content.WriteString(fmt.Sprintf("\t// Deserialize `%s`:\n", argName))
+		// AIDEV-NOTE: Always check decoder.Remaining() to prevent panics when fields are missing
+		content.WriteString("\tif decoder.Remaining() > 0 {\n")
 		if arg.Optional {
-			// AIDEV-NOTE: Fixed optional field decoding - read presence flag first
-			content.WriteString("\t{\n")
 			content.WriteString("\t\tok, err := decoder.ReadBool()\n")
 			content.WriteString("\t\tif err != nil {\n")
 			content.WriteString("\t\t\treturn err\n")
@@ -872,13 +941,13 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 			content.WriteString("\t\t\t}\n")
 			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = tmp\n", argName))
 			content.WriteString("\t\t}\n")
-			content.WriteString("\t}\n")
 		} else {
-			content.WriteString(fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", argName))
-			content.WriteString("\tif err != nil {\n")
-			content.WriteString("\t\treturn err\n")
-			content.WriteString("\t}\n")
+			content.WriteString(fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", argName))
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
 		}
+		content.WriteString("\t}\n")
 	}
 
 	content.WriteString("\treturn nil\n")
@@ -928,6 +997,25 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 					if seed.Kind == "account" && strings.Contains(seed.Path, ".") {
 						paramName := strings.ReplaceAll(seed.Path, ".", "_")
 						additionalParams[paramName] = true
+					}
+				}
+				// AIDEV-NOTE: Add program parameter if PDA uses external program
+				// Check if this PDA uses an external program
+				if account.PDA.Program != nil && account.PDA.Program.Kind == "account" {
+					programParam := account.PDA.Program.Path
+					if strings.Contains(programParam, ".") {
+						programParam = strings.ReplaceAll(programParam, ".", "_")
+					}
+					// Only add if not already a required account
+					isRequiredAccount := false
+					for _, reqAcc := range requiredAccounts {
+						if reqAccount, ok := reqAcc.(*idl.Account); ok && reqAccount.Name == programParam {
+							isRequiredAccount = true
+							break
+						}
+					}
+					if !isRequiredAccount {
+						additionalParams[programParam] = true
 					}
 				}
 				continue

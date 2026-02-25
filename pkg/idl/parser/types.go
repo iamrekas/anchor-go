@@ -282,16 +282,12 @@ func ParseTypes(rawTypes []json.RawMessage, verbose bool) []types.TypeDef {
 		}
 
 		// Check for empty types and handle them appropriately
+		// AIDEV-NOTE: Allow empty structs as they are valid in some IDLs
 		if typeDef.Type.Kind == "struct" && len(def.Fields) == 0 {
-			// Get the raw JSON for the type
-			rawTypeStr, _ := json.Marshal(rawType)
-
 			if verbose {
-				fmt.Printf("Warning: Struct type '%s' has no fields\n", typeDef.Name)
-				fmt.Printf("JSON data: %s\n", string(rawTypeStr))
+				fmt.Printf("Info: Struct type '%s' has no fields (empty struct)\n", typeDef.Name)
 			}
-			panic(fmt.Sprintf("Error: Struct type '%s' has no fields. JSON data: %s. Empty struct types are not supported.",
-				typeDef.Name, string(rawTypeStr)))
+			// Empty structs are allowed - they'll generate as struct{} in Go
 		}
 
 		if typeDef.Type.Kind == "enum" && len(def.Variants) == 0 {
