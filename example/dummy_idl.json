@@ -687,6 +687,26 @@
           }
         ]
       }
+    },
+    {
+      "name": "CompositeOptions",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "once_seed",
+            "type": { "option": { "array": ["u8", 32] } }
+          },
+          {
+            "name": "maybe_blob",
+            "type": { "option": { "vec": "u8" } }
+          },
+          {
+            "name": "tags",
+            "type": { "vec": { "array": ["u8", 4] } }
+          }
+        ]
+      }
     }
   ]
 }

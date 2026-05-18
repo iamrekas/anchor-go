@@ -27,65 +27,21 @@ func ParseFieldType(fieldName string, fieldType json.RawMessage, verbose bool) (
 			// It's an array type
 			arraySlice, ok := arrayData.([]interface{})
 			if ok && len(arraySlice) == 2 {
-				// First, check if element type is a defined type
 				elementTypeRaw, _ := json.Marshal(arraySlice[0])
+				sizeRaw, _ := json.Marshal(arraySlice[1])
 
-				// Try to parse as a defined type
-				var definedType struct {
-					Defined interface{} `json:"defined"`
+				var size int
+				if err := json.Unmarshal(sizeRaw, &size); err != nil {
+					if verbose {
+						fmt.Printf("Warning: Failed to parse array size for field '%s'\n", fieldName)
+						fmt.Printf("JSON data: %s\n", string(rawFieldType))
+					}
+					return nil, false
 				}
 
-				if err := json.Unmarshal(elementTypeRaw, &definedType); err == nil && definedType.Defined != nil {
-					// It's a defined type
-					var typeName string
-
-					// Handle both string and object formats
-					switch v := definedType.Defined.(type) {
-					case string:
-						typeName = v
-					case map[string]interface{}:
-						if name, ok := v["name"].(string); ok {
-							typeName = name
-						}
-					}
-
-					if typeName != "" {
-						// Parse size
-						sizeRaw, _ := json.Marshal(arraySlice[1])
-						var size int
-						if err := json.Unmarshal(sizeRaw, &size); err != nil {
-							if verbose {
-								fmt.Printf("Warning: Failed to parse array size for field '%s'\n", fieldName)
-								fmt.Printf("JSON data: %s\n", string(rawFieldType))
-							}
-							return nil, false
-						}
-
-						// Create array type with a defined type as the element type
-						return &types.ArrayType{
-							ElemType:  &types.DefinedType{Name: typeName},
-							ArraySize: size,
-						}, true
-					}
-				}
-
-				// If not a defined type, try as a basic type
-				var elementType string
-				if err := json.Unmarshal(elementTypeRaw, &elementType); err == nil {
-					// Parse size
-					sizeRaw, _ := json.Marshal(arraySlice[1])
-					var size int
-					if err := json.Unmarshal(sizeRaw, &size); err != nil {
-						if verbose {
-							fmt.Printf("Warning: Failed to parse array size for field '%s'\n", fieldName)
-							fmt.Printf("JSON data: %s\n", string(rawFieldType))
-						}
-						return nil, false
-					}
-
-					// Create array type with a basic type as the element type
+				if elemType, ok := ParseFieldType(fieldName, elementTypeRaw, verbose); ok {
 					return &types.ArrayType{
-						ElemType:  &types.BasicType{TypeName: elementType},
+						ElemType:  elemType,
 						ArraySize: size,
 					}, true
 				}
@@ -114,61 +70,21 @@ func ParseFieldType(fieldName string, fieldType json.RawMessage, verbose bool) (
 
 		// Check if it's a vector type
 		if vecData, ok := typeObj["vec"]; ok {
-			// Try to handle vector of defined type
-			vecMap, ok := vecData.(map[string]interface{})
-			if ok && vecMap["defined"] != nil {
-				var typeName string
-
-				// Handle both string and object formats
-				switch v := vecMap["defined"].(type) {
-				case string:
-					typeName = v
-				case map[string]interface{}:
-					if name, ok := v["name"].(string); ok {
-						typeName = name
-					}
+			elemTypeRaw, err := json.Marshal(vecData)
+			if err == nil {
+				if elemType, ok := ParseFieldType(fieldName, elemTypeRaw, verbose); ok {
+					return &types.VectorType{ElementType: elemType}, true
 				}
-
-				if typeName != "" {
-					return &types.VectorType{ElementType: &types.DefinedType{Name: typeName}}, true
-				}
-			}
-
-			// Try as a basic type
-			var elemType string
-			elemTypeRaw, _ := json.Marshal(vecData)
-			if err := json.Unmarshal(elemTypeRaw, &elemType); err == nil {
-				return &types.VectorType{ElementType: &types.BasicType{TypeName: elemType}}, true
 			}
 		}
 
 		// Check if it's an option type
 		if optionData, ok := typeObj["option"]; ok {
-			// Try to handle option of defined type
-			optionMap, ok := optionData.(map[string]interface{})
-			if ok && optionMap["defined"] != nil {
-				var typeName string
-
-				// Handle both string and object formats
-				switch v := optionMap["defined"].(type) {
-				case string:
-					typeName = v
-				case map[string]interface{}:
-					if name, ok := v["name"].(string); ok {
-						typeName = name
-					}
+			elemTypeRaw, err := json.Marshal(optionData)
+			if err == nil {
+				if elemType, ok := ParseFieldType(fieldName, elemTypeRaw, verbose); ok {
+					return &types.OptionType{ElementType: elemType}, true
 				}
-
-				if typeName != "" {
-					return &types.OptionType{ElementType: &types.DefinedType{Name: typeName}}, true
-				}
-			}
-
-			// Try as a basic type
-			var elemType string
-			elemTypeRaw, _ := json.Marshal(optionData)
-			if err := json.Unmarshal(elemTypeRaw, &elemType); err == nil {
-				return &types.OptionType{ElementType: &types.BasicType{TypeName: elemType}}, true
 			}
 		}
 	}
