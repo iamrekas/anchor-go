@@ -189,7 +189,24 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 			marshalUsedNames[baseFieldName] = 1
 		}
 		
-		if field.Optional {
+		if field.Type.IsOption() {
+			// Borsh option: 1-byte discriminator (0 = None, 1 = Some) then
+			// payload only when Some. The bin:"optional" struct tag isn't
+			// consulted by our explicit MarshalWithEncoder body.
+			code += fmt.Sprintf("\t// Marshal `%s` (option<%s>)\n", field.Name, field.Type.(*types.OptionType).ElementType.String())
+			code += fmt.Sprintf("\tif a.%s == nil {\n", fieldName)
+			code += fmt.Sprintf("\t\tif err := encoder.WriteByte(0); err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write option tag for %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t} else {\n")
+			code += fmt.Sprintf("\t\tif err := encoder.WriteByte(1); err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write option tag for %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t\tif err := encoder.Encode(a.%s); err != nil {\n", fieldName)
+			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to encode %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t}\n")
+		} else if field.Optional {
 			code += fmt.Sprintf("\t// Marshal optional field %s\n", field.Name)
 			code += fmt.Sprintf("\tif a.%s == nil {\n", fieldName)
 			code += fmt.Sprintf("\t\tif err := encoder.WriteBool(false); err != nil {\n")
@@ -247,7 +264,25 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 			unmarshalUsedNames[baseFieldName] = 1
 		}
 		
-		if field.Optional {
+		if field.Type.IsOption() {
+			innerType := g.generateFieldType(field.Type.(*types.OptionType).ElementType, _idl)
+			code += fmt.Sprintf("\t// Unmarshal `%s` (option<%s>)\n", field.Name, field.Type.(*types.OptionType).ElementType.String())
+			code += fmt.Sprintf("\t{\n")
+			code += fmt.Sprintf("\t\toptTag, err := decoder.ReadByte()\n")
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to read option tag for %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t\tif optTag == 1 {\n")
+			code += fmt.Sprintf("\t\t\tvar v %s\n", innerType)
+			code += fmt.Sprintf("\t\t\tif err := decoder.Decode(&v); err != nil {\n")
+			code += fmt.Sprintf("\t\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+			code += fmt.Sprintf("\t\t\t}\n")
+			code += fmt.Sprintf("\t\t\ta.%s = &v\n", fieldName)
+			code += fmt.Sprintf("\t\t} else {\n")
+			code += fmt.Sprintf("\t\t\ta.%s = nil\n", fieldName)
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t}\n")
+		} else if field.Optional {
 			code += fmt.Sprintf("\t// Unmarshal optional field %s\n", field.Name)
 			code += fmt.Sprintf("\thasValue, err := decoder.ReadBool()\n")
 			code += fmt.Sprintf("\tif err != nil {\n")

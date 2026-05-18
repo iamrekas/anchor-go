@@ -296,11 +296,27 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\t}\n")
 			code += fmt.Sprintf("\t}\n")
 		} else if field.Type.IsOption() {
-			// Option types are handled by the encoder with bin:"optional" tag
-			code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
-			code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
-			code += fmt.Sprintf("\tif err != nil {\n")
-			code += fmt.Sprintf("\t\treturn err\n")
+			// Borsh option: 1-byte discriminator (0 = None, 1 = Some) followed
+			// by the payload only when Some. The bin:"optional" struct tag is
+			// not enough here — ag_binary only consults the tag when it walks
+			// fields via reflection, and our explicit MarshalWithEncoder body
+			// (BinaryMarshaler) bypasses that walk, so we must emit the
+			// discriminator ourselves.
+			code += fmt.Sprintf("\t// Serialize `%s` param (option<%s>):\n", field.Name, field.Type.(*types.OptionType).ElementType.String())
+			code += fmt.Sprintf("\tif obj.%s == nil {\n", fieldName)
+			code += fmt.Sprintf("\t\terr = encoder.WriteByte(0)\n")
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t} else {\n")
+			code += fmt.Sprintf("\t\terr = encoder.WriteByte(1)\n")
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t\terr = encoder.Encode(obj.%s)\n", fieldName)
+			code += fmt.Sprintf("\t\tif err != nil {\n")
+			code += fmt.Sprintf("\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t}\n")
 			code += fmt.Sprintf("\t}\n")
 		} else if field.Optional {
 			code += fmt.Sprintf("\t// Serialize `%s` param (optional):\n", field.Name)
@@ -386,10 +402,22 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"unknown enum index: %%v\", tmp.Enum)\n")
 			code += fmt.Sprintf("\t\t}\n")
 		} else if field.Type.IsOption() {
-			// Option types are handled by the decoder with bin:"optional" tag
-			code += fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", fieldName)
+			// Borsh option: read 1-byte discriminator, then decode the payload
+			// only when it is 1. See the matching note in the marshal path
+			// above for why the bin:"optional" tag isn't sufficient here.
+			innerType := g.generateFieldType(field.Type.(*types.OptionType).ElementType)
+			code += fmt.Sprintf("\t\toptTag, err := decoder.ReadByte()\n")
 			code += fmt.Sprintf("\t\tif err != nil {\n")
 			code += fmt.Sprintf("\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t}\n")
+			code += fmt.Sprintf("\t\tif optTag == 1 {\n")
+			code += fmt.Sprintf("\t\t\tvar v %s\n", innerType)
+			code += fmt.Sprintf("\t\t\tif err := decoder.Decode(&v); err != nil {\n")
+			code += fmt.Sprintf("\t\t\t\treturn err\n")
+			code += fmt.Sprintf("\t\t\t}\n")
+			code += fmt.Sprintf("\t\t\tobj.%s = &v\n", fieldName)
+			code += fmt.Sprintf("\t\t} else {\n")
+			code += fmt.Sprintf("\t\t\tobj.%s = nil\n", fieldName)
 			code += fmt.Sprintf("\t\t}\n")
 		} else if field.Optional {
 			if !hasOptionalField {

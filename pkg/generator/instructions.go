@@ -890,7 +890,24 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	for _, arg := range instr.Args {
 		argName := toCamelCase(arg.Name)
 		content.WriteString(fmt.Sprintf("\t// Serialize `%s` param:\n", argName))
-		if arg.Optional {
+		if arg.Type.IsOption() {
+			// Borsh option: write 1-byte discriminator, then payload only when Some.
+			content.WriteString(fmt.Sprintf("\tif obj.%s == nil {\n", argName))
+			content.WriteString("\t\terr = encoder.WriteByte(0)\n")
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString("\t} else {\n")
+			content.WriteString("\t\terr = encoder.WriteByte(1)\n")
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString(fmt.Sprintf("\t\terr = encoder.Encode(obj.%s)\n", argName))
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString("\t}\n")
+		} else if arg.Optional {
 			// AIDEV-NOTE: Fixed optional field encoding - write presence flag first
 			content.WriteString(fmt.Sprintf("\tif obj.%s != nil {\n", argName))
 			content.WriteString("\t\terr = encoder.WriteBool(true)\n")
@@ -927,7 +944,23 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 		content.WriteString(fmt.Sprintf("\t// Deserialize `%s`:\n", argName))
 		// AIDEV-NOTE: Always check decoder.Remaining() to prevent panics when fields are missing
 		content.WriteString("\tif decoder.Remaining() > 0 {\n")
-		if arg.Optional {
+		if arg.Type.IsOption() {
+			// Borsh option: read 1-byte discriminator, then decode payload only when Some.
+			innerType := g.generateFieldType(arg.Type.(*types.OptionType).ElementType, _idl)
+			content.WriteString("\t\toptTag, err := decoder.ReadByte()\n")
+			content.WriteString("\t\tif err != nil {\n")
+			content.WriteString("\t\t\treturn err\n")
+			content.WriteString("\t\t}\n")
+			content.WriteString("\t\tif optTag == 1 {\n")
+			content.WriteString(fmt.Sprintf("\t\t\tvar v %s\n", innerType))
+			content.WriteString("\t\t\tif err := decoder.Decode(&v); err != nil {\n")
+			content.WriteString("\t\t\t\treturn err\n")
+			content.WriteString("\t\t\t}\n")
+			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = &v\n", argName))
+			content.WriteString("\t\t} else {\n")
+			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = nil\n", argName))
+			content.WriteString("\t\t}\n")
+		} else if arg.Optional {
 			content.WriteString("\t\tok, err := decoder.ReadBool()\n")
 			content.WriteString("\t\tif err != nil {\n")
 			content.WriteString("\t\t\treturn err\n")
