@@ -400,8 +400,13 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 			}
 		}
 		argType := g.generateFieldType(arg.Type, _idl)
-		if arg.Optional {
-			content.WriteString(fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", toCamelCase(arg.Name), argType))
+		// option<T> arrives as Optional[T] from generateFieldType; "optional: true"
+		// on a non-option type is wrapped here. Other args remain *T to match
+		// historical layout.
+		if arg.Optional && !arg.Type.IsOption() {
+			content.WriteString(fmt.Sprintf("\t%s Optional[%s]\n", toCamelCase(arg.Name), argType))
+		} else if arg.Type.IsOption() {
+			content.WriteString(fmt.Sprintf("\t%s %s\n", toCamelCase(arg.Name), argType))
 		} else {
 			content.WriteString(fmt.Sprintf("\t%s *%s\n", toCamelCase(arg.Name), argType))
 		}
@@ -469,12 +474,19 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	content.WriteString("\treturn nd\n")
 	content.WriteString("}\n\n")
 
-	// Generate setter methods for arguments
+	// Generate setter methods for arguments. Optional[T] (both forms of
+	// optional) is value-stored; everything else stays *T.
 	for _, arg := range instr.Args {
 		argName := toCamelCase(arg.Name)
+		paramType := g.argStorageType(arg, _idl)
+		isOptional := arg.Optional || arg.Type.IsOption()
 		content.WriteString(fmt.Sprintf("// Set%s sets the \"%s\" parameter.\n", argName, arg.Name))
-		content.WriteString(fmt.Sprintf("func (inst *%s) Set%s(%s %s) *%s {\n", instrName, argName, arg.Name, g.generateFieldType(arg.Type, _idl), instrName))
-		content.WriteString(fmt.Sprintf("\tinst.%s = &%s\n", argName, arg.Name))
+		content.WriteString(fmt.Sprintf("func (inst *%s) Set%s(%s %s) *%s {\n", instrName, argName, arg.Name, paramType, instrName))
+		if isOptional {
+			content.WriteString(fmt.Sprintf("\tinst.%s = %s\n", argName, arg.Name))
+		} else {
+			content.WriteString(fmt.Sprintf("\tinst.%s = &%s\n", argName, arg.Name))
+		}
 		content.WriteString(fmt.Sprintf("\treturn inst\n"))
 		content.WriteString("}\n\n")
 	}
@@ -817,7 +829,9 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 		content.WriteString("\t// Check whether all (required) parameters are set:\n")
 		content.WriteString("\t{\n")
 		for _, arg := range instr.Args {
-			if !arg.Optional {
+			// Skip nil-check for optional flag args and for Optional[T] wrapped values
+			// (those are value types, not pointers, and always "set" — Set=false is None).
+			if !arg.Optional && !arg.Type.IsOption() {
 				argName := toCamelCase(arg.Name)
 				content.WriteString(fmt.Sprintf("\t\tif inst.%s == nil {\n", argName))
 				content.WriteString(fmt.Sprintf("\t\t\treturn errors.New(\"%s parameter is not set\")\n", argName))
@@ -886,50 +900,16 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	// Generate MarshalWithEncoder method
 	content.WriteString(fmt.Sprintf("func (obj %s) MarshalWithEncoder(encoder *ag_binary.Encoder) (err error) {\n", instrName))
 
-	// Add serialization code for each argument
+	// Add serialization code for each argument. Optional[T] (the wrapper for
+	// both option<T> and "optional: true") self-marshals, so every path here
+	// collapses to a single Encode call.
 	for _, arg := range instr.Args {
 		argName := toCamelCase(arg.Name)
 		content.WriteString(fmt.Sprintf("\t// Serialize `%s` param:\n", argName))
-		if arg.Type.IsOption() {
-			// Borsh option: write 1-byte discriminator, then payload only when Some.
-			content.WriteString(fmt.Sprintf("\tif obj.%s == nil {\n", argName))
-			content.WriteString("\t\terr = encoder.WriteByte(0)\n")
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString("\t} else {\n")
-			content.WriteString("\t\terr = encoder.WriteByte(1)\n")
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString(fmt.Sprintf("\t\terr = encoder.Encode(obj.%s)\n", argName))
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString("\t}\n")
-		} else if arg.Optional {
-			// AIDEV-NOTE: Fixed optional field encoding - write presence flag first
-			content.WriteString(fmt.Sprintf("\tif obj.%s != nil {\n", argName))
-			content.WriteString("\t\terr = encoder.WriteBool(true)\n")
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString(fmt.Sprintf("\t\terr = encoder.Encode(*obj.%s)\n", argName))
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString("\t} else {\n")
-			content.WriteString("\t\terr = encoder.WriteBool(false)\n")
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString("\t}\n")
-		} else {
-			content.WriteString(fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", argName))
-			content.WriteString("\tif err != nil {\n")
-			content.WriteString("\t\treturn err\n")
-			content.WriteString("\t}\n")
-		}
+		content.WriteString(fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", argName))
+		content.WriteString("\tif err != nil {\n")
+		content.WriteString("\t\treturn err\n")
+		content.WriteString("\t}\n")
 	}
 
 	content.WriteString("\treturn nil\n")
@@ -938,48 +918,16 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	// Generate UnmarshalWithDecoder method
 	content.WriteString(fmt.Sprintf("func (obj *%s) UnmarshalWithDecoder(decoder *ag_binary.Decoder) (err error) {\n", instrName))
 
-	// Add deserialization code for each argument
+	// Add deserialization code for each argument. Optional[T] handles its own
+	// presence byte; trailing absence is handled by the outer Remaining check.
 	for _, arg := range instr.Args {
 		argName := toCamelCase(arg.Name)
 		content.WriteString(fmt.Sprintf("\t// Deserialize `%s`:\n", argName))
-		// AIDEV-NOTE: Always check decoder.Remaining() to prevent panics when fields are missing
 		content.WriteString("\tif decoder.Remaining() > 0 {\n")
-		if arg.Type.IsOption() {
-			// Borsh option: read 1-byte discriminator, then decode payload only when Some.
-			innerType := g.generateFieldType(arg.Type.(*types.OptionType).ElementType, _idl)
-			content.WriteString("\t\toptTag, err := decoder.ReadByte()\n")
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString("\t\tif optTag == 1 {\n")
-			content.WriteString(fmt.Sprintf("\t\t\tvar v %s\n", innerType))
-			content.WriteString("\t\t\tif err := decoder.Decode(&v); err != nil {\n")
-			content.WriteString("\t\t\t\treturn err\n")
-			content.WriteString("\t\t\t}\n")
-			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = &v\n", argName))
-			content.WriteString("\t\t} else {\n")
-			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = nil\n", argName))
-			content.WriteString("\t\t}\n")
-		} else if arg.Optional {
-			content.WriteString("\t\tok, err := decoder.ReadBool()\n")
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-			content.WriteString("\t\tif ok {\n")
-			argType := g.generateFieldType(arg.Type, _idl)
-			content.WriteString(fmt.Sprintf("\t\t\ttmp := new(%s)\n", argType))
-			content.WriteString("\t\t\terr = decoder.Decode(tmp)\n")
-			content.WriteString("\t\t\tif err != nil {\n")
-			content.WriteString("\t\t\t\treturn err\n")
-			content.WriteString("\t\t\t}\n")
-			content.WriteString(fmt.Sprintf("\t\t\tobj.%s = tmp\n", argName))
-			content.WriteString("\t\t}\n")
-		} else {
-			content.WriteString(fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", argName))
-			content.WriteString("\t\tif err != nil {\n")
-			content.WriteString("\t\t\treturn err\n")
-			content.WriteString("\t\t}\n")
-		}
+		content.WriteString(fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", argName))
+		content.WriteString("\t\tif err != nil {\n")
+		content.WriteString("\t\t\treturn err\n")
+		content.WriteString("\t\t}\n")
 		content.WriteString("\t}\n")
 	}
 
@@ -993,8 +941,7 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 
 	// Generate argument parameters
 	for i, arg := range instr.Args {
-		argType := g.generateFieldType(arg.Type, _idl)
-		content.WriteString(fmt.Sprintf("\t%s %s", arg.Name, argType))
+		content.WriteString(fmt.Sprintf("\t%s %s", arg.Name, g.argStorageType(arg, _idl)))
 		if i < len(instr.Args)-1 || len(instr.Accounts) > 0 {
 			content.WriteString(",\n")
 		}
@@ -1110,6 +1057,22 @@ func (g *InstructionsGenerator) generateInstructionFile(_idl idl.IDL, instr idl.
 	return file, nil
 }
 
+// argStorageType returns the Go type used to store an instruction argument
+// in the instruction struct and to receive it in setters / constructors.
+// option<T> and IDL "optional: true" both collapse to Optional[T]; everything
+// else returns the bare type rendered by generateFieldType.
+func (g *InstructionsGenerator) argStorageType(arg idl.Field, _idl idl.IDL) string {
+	rendered := g.generateFieldType(arg.Type, _idl)
+	if arg.Type.IsOption() {
+		// generateFieldType already returns Optional[...] for option<T>.
+		return rendered
+	}
+	if arg.Optional {
+		return fmt.Sprintf("Optional[%s]", rendered)
+	}
+	return rendered
+}
+
 // generateFieldType generates Go type for an IDL type
 func (g *InstructionsGenerator) generateFieldType(t idl.Type, _idl idl.IDL) string {
 	if t.IsBasic() {
@@ -1122,7 +1085,7 @@ func (g *InstructionsGenerator) generateFieldType(t idl.Type, _idl idl.IDL) stri
 			return fmt.Sprintf("[]%s", g.mapBasicType(elemType))
 		} else if strings.HasPrefix(typeName, "option:") {
 			elemType := strings.TrimPrefix(typeName, "option:")
-			return fmt.Sprintf("*%s", g.mapBasicType(elemType))
+			return fmt.Sprintf("Optional[%s]", g.mapBasicType(elemType))
 		}
 
 		return g.mapBasicType(typeName)
@@ -1143,13 +1106,13 @@ func (g *InstructionsGenerator) generateFieldType(t idl.Type, _idl idl.IDL) stri
 		elemType := g.generateFieldType(vecType.ElementType, _idl)
 		return fmt.Sprintf("[]%s", elemType)
 	} else if t.IsOption() {
-		// Handle option types
+		// Borsh option<T>: rendered as the generic wrapper Optional[T] (see types.go).
 		optType, ok := t.(*types.OptionType)
 		if !ok {
-			return "interface{}"
+			return "Optional[interface{}]"
 		}
 		elemType := g.generateFieldType(optType.ElementType, _idl)
-		return fmt.Sprintf("*%s", elemType)
+		return fmt.Sprintf("Optional[%s]", elemType)
 	} else if t.IsDefined() {
 		// Handle defined types
 		typeName := t.String()

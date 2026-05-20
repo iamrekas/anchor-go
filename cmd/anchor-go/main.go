@@ -82,6 +82,7 @@ func main() {
 	typesGen := generator.NewTypesGenerator()
 	eventsGen := generator.NewEventsGenerator()
 	errorsGen := generator.NewErrorsGenerator()
+	optionalGen := generator.NewOptionalGenerator()
 
 	// Create composite generator
 	gen := generator.NewCompositeGenerator(
@@ -90,6 +91,7 @@ func main() {
 		typesGen,
 		eventsGen,
 		errorsGen,
+		optionalGen,
 	)
 	gen.SetConfig(config)
 

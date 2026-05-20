@@ -221,12 +221,13 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			usedFieldNames[baseFieldName] = 1
 		}
 
-		// Check if the field type is already an option type (pointer)
-		if field.Type.IsOption() {
-			// Option types are already pointers, just add the bin:"optional" tag
-			code += fmt.Sprintf("\t%s %s `bin:\"optional\"`\n", fieldName, fieldType)
-		} else if field.Optional {
-			code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", fieldName, fieldType)
+		// option<T> and IDL "optional: true" both render as Optional[T] (a
+		// self-contained Borsh marshaler). generateFieldType already returns
+		// Optional[T] for option<T>; for the IDL flag on a non-option type we
+		// wrap here. The reflective bin:"optional" tag is unused because our
+		// MarshalWithEncoder body bypasses ag_binary's struct walk.
+		if field.Optional && !field.Type.IsOption() {
+			code += fmt.Sprintf("\t%s Optional[%s]\n", fieldName, fieldType)
 		} else {
 			code += fmt.Sprintf("\t%s %s\n", fieldName, fieldType)
 		}
@@ -295,44 +296,9 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\t\treturn err\n")
 			code += fmt.Sprintf("\t\t}\n")
 			code += fmt.Sprintf("\t}\n")
-		} else if field.Type.IsOption() {
-			// Borsh option: 1-byte discriminator (0 = None, 1 = Some) followed
-			// by the payload only when Some. The bin:"optional" struct tag is
-			// not enough here — ag_binary only consults the tag when it walks
-			// fields via reflection, and our explicit MarshalWithEncoder body
-			// (BinaryMarshaler) bypasses that walk, so we must emit the
-			// discriminator ourselves.
-			code += fmt.Sprintf("\t// Serialize `%s` param (option<%s>):\n", field.Name, field.Type.(*types.OptionType).ElementType.String())
-			code += fmt.Sprintf("\tif obj.%s == nil {\n", fieldName)
-			code += fmt.Sprintf("\t\terr = encoder.WriteByte(0)\n")
-			code += fmt.Sprintf("\t\tif err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn err\n")
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t} else {\n")
-			code += fmt.Sprintf("\t\terr = encoder.WriteByte(1)\n")
-			code += fmt.Sprintf("\t\tif err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn err\n")
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\terr = encoder.Encode(obj.%s)\n", fieldName)
-			code += fmt.Sprintf("\t\tif err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn err\n")
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
-		} else if field.Optional {
-			code += fmt.Sprintf("\t// Serialize `%s` param (optional):\n", field.Name)
-			code += fmt.Sprintf("\tif obj.%s == nil {\n", fieldName)
-			code += fmt.Sprintf("\t\tif err := encoder.WriteBool(false); err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t} else {\n")
-			code += fmt.Sprintf("\t\tif err := encoder.WriteBool(true); err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\tif err := encoder.Encode(obj.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to encode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
 		} else {
+			// option<T> and "optional: true" both arrive as Optional[T] from the
+			// field declaration; the wrapper self-marshals.
 			code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
 			code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
 			code += fmt.Sprintf("\tif err != nil {\n")
@@ -357,9 +323,6 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 		code += fmt.Sprintf("\t}\n\n")
 	}
 
-	// Track if hasValue has been declared for optional fields
-	hasOptionalField := false
-	
 	// Track used field names again for unmarshal method
 	// AIDEV-NOTE: Need to regenerate deduplicated names for unmarshal method
 	unmarshalUsedNames := make(map[string]int)
@@ -401,43 +364,9 @@ func (g *TypesGenerator) generateStruct(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("\t\tdefault:\n")
 			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"unknown enum index: %%v\", tmp.Enum)\n")
 			code += fmt.Sprintf("\t\t}\n")
-		} else if field.Type.IsOption() {
-			// Borsh option: read 1-byte discriminator, then decode the payload
-			// only when it is 1. See the matching note in the marshal path
-			// above for why the bin:"optional" tag isn't sufficient here.
-			innerType := g.generateFieldType(field.Type.(*types.OptionType).ElementType)
-			code += fmt.Sprintf("\t\toptTag, err := decoder.ReadByte()\n")
-			code += fmt.Sprintf("\t\tif err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn err\n")
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\tif optTag == 1 {\n")
-			code += fmt.Sprintf("\t\t\tvar v %s\n", innerType)
-			code += fmt.Sprintf("\t\t\tif err := decoder.Decode(&v); err != nil {\n")
-			code += fmt.Sprintf("\t\t\t\treturn err\n")
-			code += fmt.Sprintf("\t\t\t}\n")
-			code += fmt.Sprintf("\t\t\tobj.%s = &v\n", fieldName)
-			code += fmt.Sprintf("\t\t} else {\n")
-			code += fmt.Sprintf("\t\t\tobj.%s = nil\n", fieldName)
-			code += fmt.Sprintf("\t\t}\n")
-		} else if field.Optional {
-			if !hasOptionalField {
-				// First optional field: use := to declare variables
-				code += fmt.Sprintf("\t\thasValue, err := decoder.ReadBool()\n")
-				hasOptionalField = true
-			} else {
-				// Subsequent optional fields: use = for assignment
-				code += fmt.Sprintf("\t\thasValue, err = decoder.ReadBool()\n")
-			}
-			code += fmt.Sprintf("\t\tif err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to read optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\tif hasValue {\n")
-			code += fmt.Sprintf("\t\t\tobj.%s = new(%s)\n", fieldName, g.generateFieldType(field.Type))
-			code += fmt.Sprintf("\t\t\tif err := decoder.Decode(obj.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t\t}\n")
-			code += fmt.Sprintf("\t\t}\n")
 		} else {
+			// option<T> and "optional: true" both arrive as Optional[T]; the
+			// wrapper self-unmarshals (presence byte + payload).
 			code += fmt.Sprintf("\t\terr = decoder.Decode(&obj.%s)\n", fieldName)
 			code += fmt.Sprintf("\t\tif err != nil {\n")
 			code += fmt.Sprintf("\t\t\treturn err\n")
@@ -521,12 +450,9 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 			code += fmt.Sprintf("type %s%sVariant struct {\n", typeDef.Name, variant.Name)
 			for _, field := range variant.Fields {
 				fieldType := g.generateFieldType(field.Type)
-				// Check if the field type is already an option type (pointer)
-				if field.Type.IsOption() {
-					// Option types are already pointers, just add the bin:"optional" tag
-					code += fmt.Sprintf("\t%s %s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
-				} else if field.Optional {
-					code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", toCamelCase(field.Name), fieldType)
+				// option<T> and IDL "optional: true" both render as Optional[T].
+				if field.Optional && !field.Type.IsOption() {
+					code += fmt.Sprintf("\t%s Optional[%s]\n", toCamelCase(field.Name), fieldType)
 				} else {
 					code += fmt.Sprintf("\t%s %s\n", toCamelCase(field.Name), fieldType)
 				}
@@ -543,33 +469,12 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 					code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldType)
 				} else {
 					fieldName := toCamelCase(field.Name)
-					if field.Type.IsOption() {
-						// For option types, we need to handle the optional serialization manually
-						code += fmt.Sprintf("\t// Serialize `%s` param (optional):\n", field.Name)
-						code += fmt.Sprintf("\t{\n")
-						code += fmt.Sprintf("\t\tif obj.%s == nil {\n", fieldName)
-						code += fmt.Sprintf("\t\t\terr = encoder.WriteBool(false)\n")
-						code += fmt.Sprintf("\t\t\tif err != nil {\n")
-						code += fmt.Sprintf("\t\t\t\treturn err\n")
-						code += fmt.Sprintf("\t\t\t}\n")
-						code += fmt.Sprintf("\t\t} else {\n")
-						code += fmt.Sprintf("\t\t\terr = encoder.WriteBool(true)\n")
-						code += fmt.Sprintf("\t\t\tif err != nil {\n")
-						code += fmt.Sprintf("\t\t\t\treturn err\n")
-						code += fmt.Sprintf("\t\t\t}\n")
-						code += fmt.Sprintf("\t\t\terr = encoder.Encode(obj.%s)\n", fieldName)
-						code += fmt.Sprintf("\t\t\tif err != nil {\n")
-						code += fmt.Sprintf("\t\t\t\treturn err\n")
-						code += fmt.Sprintf("\t\t\t}\n")
-						code += fmt.Sprintf("\t\t}\n")
-						code += fmt.Sprintf("\t}\n")
-					} else {
-						code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
-						code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
-						code += fmt.Sprintf("\tif err != nil {\n")
-						code += fmt.Sprintf("\t\treturn err\n")
-						code += fmt.Sprintf("\t}\n")
-					}
+					// Optional[T] handles its own option discriminator via MarshalWithEncoder.
+					code += fmt.Sprintf("\t// Serialize `%s` param:\n", field.Name)
+					code += fmt.Sprintf("\terr = encoder.Encode(obj.%s)\n", fieldName)
+					code += fmt.Sprintf("\tif err != nil {\n")
+					code += fmt.Sprintf("\t\treturn err\n")
+					code += fmt.Sprintf("\t}\n")
 				}
 			}
 			code += fmt.Sprintf("\treturn nil\n")
@@ -585,30 +490,12 @@ func (g *TypesGenerator) generateEnum(typeDef idl.TypeDef) string {
 					code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldType)
 				} else {
 					fieldName := toCamelCase(field.Name)
-					if field.Type.IsOption() {
-						// For option types, we need to handle the optional deserialization manually
-						code += fmt.Sprintf("\t// Deserialize `%s` (optional):\n", field.Name)
-						code += fmt.Sprintf("\t{\n")
-						code += fmt.Sprintf("\t\thasValue := false\n")
-						code += fmt.Sprintf("\t\terr = decoder.Decode(&hasValue)\n")
-						code += fmt.Sprintf("\t\tif err != nil {\n")
-						code += fmt.Sprintf("\t\t\treturn err\n")
-						code += fmt.Sprintf("\t\t}\n")
-						code += fmt.Sprintf("\t\tif hasValue {\n")
-						code += fmt.Sprintf("\t\t\tobj.%s = new(%s)\n", fieldName, g.generateFieldType(field.Type.(*types.OptionType).ElementType))
-						code += fmt.Sprintf("\t\t\terr = decoder.Decode(obj.%s)\n", fieldName)
-						code += fmt.Sprintf("\t\t\tif err != nil {\n")
-						code += fmt.Sprintf("\t\t\t\treturn err\n")
-						code += fmt.Sprintf("\t\t\t}\n")
-						code += fmt.Sprintf("\t\t}\n")
-						code += fmt.Sprintf("\t}\n")
-					} else {
-						code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
-						code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
-						code += fmt.Sprintf("\tif err != nil {\n")
-						code += fmt.Sprintf("\t\treturn err\n")
-						code += fmt.Sprintf("\t}\n")
-					}
+					// Optional[T] handles its own option discriminator via UnmarshalWithDecoder.
+					code += fmt.Sprintf("\t// Deserialize `%s`:\n", field.Name)
+					code += fmt.Sprintf("\terr = decoder.Decode(&obj.%s)\n", fieldName)
+					code += fmt.Sprintf("\tif err != nil {\n")
+					code += fmt.Sprintf("\t\treturn err\n")
+					code += fmt.Sprintf("\t}\n")
 				}
 			}
 			code += fmt.Sprintf("\treturn nil\n")
@@ -798,13 +685,14 @@ func (g *TypesGenerator) generateFieldType(t idl.Type) string {
 		elemType := g.generateFieldType(vecType.ElementType)
 		return fmt.Sprintf("[]%s", elemType)
 	} else if t.IsOption() {
-		// Handle option types
+		// Borsh option<T>: rendered as the generic wrapper Optional[T] whose
+		// MarshalWithEncoder/UnmarshalWithDecoder own the discriminator byte.
 		optType, ok := t.(*types.OptionType)
 		if !ok {
-			return "*interface{}"
+			return "Optional[interface{}]"
 		}
 		elemType := g.generateFieldType(optType.ElementType)
-		return fmt.Sprintf("*%s", elemType)
+		return fmt.Sprintf("Optional[%s]", elemType)
 	} else if t.IsDefined() {
 		// Handle defined types
 		return t.String()

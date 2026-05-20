@@ -127,8 +127,11 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 			usedFieldNames[baseFieldName] = 1
 		}
 		
-		if field.Optional {
-			code += fmt.Sprintf("\t%s *%s `bin:\"optional\"`\n", fieldName, fieldType)
+		// option<T> arrives as Optional[T] from generateFieldType; "optional: true"
+		// on a non-option type is wrapped here. Both flow through the wrapper's
+		// self-(un)marshal so the bin:"optional" tag is no longer needed.
+		if field.Optional && !field.Type.IsOption() {
+			code += fmt.Sprintf("\t%s Optional[%s]\n", fieldName, fieldType)
 		} else {
 			code += fmt.Sprintf("\t%s %s\n", fieldName, fieldType)
 		}
@@ -189,43 +192,12 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 			marshalUsedNames[baseFieldName] = 1
 		}
 		
-		if field.Type.IsOption() {
-			// Borsh option: 1-byte discriminator (0 = None, 1 = Some) then
-			// payload only when Some. The bin:"optional" struct tag isn't
-			// consulted by our explicit MarshalWithEncoder body.
-			code += fmt.Sprintf("\t// Marshal `%s` (option<%s>)\n", field.Name, field.Type.(*types.OptionType).ElementType.String())
-			code += fmt.Sprintf("\tif a.%s == nil {\n", fieldName)
-			code += fmt.Sprintf("\t\tif err := encoder.WriteByte(0); err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write option tag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t} else {\n")
-			code += fmt.Sprintf("\t\tif err := encoder.WriteByte(1); err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write option tag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\tif err := encoder.Encode(a.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to encode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
-		} else if field.Optional {
-			code += fmt.Sprintf("\t// Marshal optional field %s\n", field.Name)
-			code += fmt.Sprintf("\tif a.%s == nil {\n", fieldName)
-			code += fmt.Sprintf("\t\tif err := encoder.WriteBool(false); err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t} else {\n")
-			code += fmt.Sprintf("\t\tif err := encoder.WriteBool(true); err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to write optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\tif err := encoder.Encode(a.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to encode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
-		} else {
-			code += fmt.Sprintf("\t// Marshal field %s\n", field.Name)
-			code += fmt.Sprintf("\tif err := encoder.Encode(a.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to encode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t}\n")
-		}
+		// Optional[T] (the wrapper for both option<T> and "optional: true")
+		// self-marshals; plain fields use the normal Encode path.
+		code += fmt.Sprintf("\t// Marshal field %s\n", field.Name)
+		code += fmt.Sprintf("\tif err := encoder.Encode(a.%s); err != nil {\n", fieldName)
+		code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to encode %s: %%w\", err)\n", field.Name)
+		code += fmt.Sprintf("\t}\n")
 	}
 
 	code += fmt.Sprintf("\treturn nil\n")
@@ -264,42 +236,11 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 			unmarshalUsedNames[baseFieldName] = 1
 		}
 		
-		if field.Type.IsOption() {
-			innerType := g.generateFieldType(field.Type.(*types.OptionType).ElementType, _idl)
-			code += fmt.Sprintf("\t// Unmarshal `%s` (option<%s>)\n", field.Name, field.Type.(*types.OptionType).ElementType.String())
-			code += fmt.Sprintf("\t{\n")
-			code += fmt.Sprintf("\t\toptTag, err := decoder.ReadByte()\n")
-			code += fmt.Sprintf("\t\tif err != nil {\n")
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to read option tag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t\tif optTag == 1 {\n")
-			code += fmt.Sprintf("\t\t\tvar v %s\n", innerType)
-			code += fmt.Sprintf("\t\t\tif err := decoder.Decode(&v); err != nil {\n")
-			code += fmt.Sprintf("\t\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t\t}\n")
-			code += fmt.Sprintf("\t\t\ta.%s = &v\n", fieldName)
-			code += fmt.Sprintf("\t\t} else {\n")
-			code += fmt.Sprintf("\t\t\ta.%s = nil\n", fieldName)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
-		} else if field.Optional {
-			code += fmt.Sprintf("\t// Unmarshal optional field %s\n", field.Name)
-			code += fmt.Sprintf("\thasValue, err := decoder.ReadBool()\n")
-			code += fmt.Sprintf("\tif err != nil {\n")
-			code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to read optional flag for %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t}\n")
-			code += fmt.Sprintf("\tif hasValue {\n")
-			code += fmt.Sprintf("\t\ta.%s = new(%s)\n", fieldName, g.generateFieldType(field.Type, _idl))
-			code += fmt.Sprintf("\t\tif err := decoder.Decode(a.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t\t}\n")
-			code += fmt.Sprintf("\t}\n")
-		} else {
-			code += fmt.Sprintf("\t// Unmarshal field %s\n", field.Name)
-			code += fmt.Sprintf("\tif err := decoder.Decode(&a.%s); err != nil {\n", fieldName)
-			code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
-			code += fmt.Sprintf("\t}\n")
-		}
+		// Optional[T] handles its own presence byte; plain fields use Decode.
+		code += fmt.Sprintf("\t// Unmarshal field %s\n", field.Name)
+		code += fmt.Sprintf("\tif err := decoder.Decode(&a.%s); err != nil {\n", fieldName)
+		code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+		code += fmt.Sprintf("\t}\n")
 	}
 
 	code += fmt.Sprintf("\treturn nil\n")
@@ -369,11 +310,10 @@ func (g *AccountsGenerator) generateFieldType(t idl.Type, _idl idl.IDL) string {
 		elemType := g.generateFieldType(vecType.ElementType, _idl)
 		return fmt.Sprintf("[]%s", elemType)
 	} else if t.IsOption() {
-		// Handle option types
-		// AIDEV-NOTE: OptionType has ElementType field, not method
+		// Borsh option<T>: rendered as the generic wrapper Optional[T] (see types.go).
 		optType := t.(*types.OptionType)
 		elemType := g.generateFieldType(optType.ElementType, _idl)
-		return fmt.Sprintf("*%s", elemType)
+		return fmt.Sprintf("Optional[%s]", elemType)
 	} else if t.IsDefined() {
 		// Handle defined types
 		typeName := t.String()
