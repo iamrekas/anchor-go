@@ -201,10 +201,17 @@ func (g *EventsGenerator) generateEvent(event idl.Event) string {
 	code += fmt.Sprintf("\t}\n\n")
 
 	// Unmarshal fields. Optional[T] handles its own presence byte.
+	// AIDEV-NOTE: guard every field with decoder.Remaining() > 0. Anchor events are append-only, so
+	// on-chain events emitted before a field was added are shorter than the current IDL struct. Without
+	// this guard, decoding an older/shorter event errors ("uint64 required, remaining [0]") — e.g.
+	// pump.fun TradeEvent gained buyback/quote fields over time. Guarding lets one struct decode every
+	// vintage: present fields fill, newer trailing fields stay zero. Mirrors types.go.
 	for _, field := range event.Fields {
 		code += fmt.Sprintf("\t// Unmarshal field %s\n", field.Name)
-		code += fmt.Sprintf("\tif err := decoder.Decode(&e.%s); err != nil {\n", toCamelCase(field.Name))
-		code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+		code += fmt.Sprintf("\tif decoder.Remaining() > 0 {\n")
+		code += fmt.Sprintf("\t\tif err := decoder.Decode(&e.%s); err != nil {\n", toCamelCase(field.Name))
+		code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+		code += fmt.Sprintf("\t\t}\n")
 		code += fmt.Sprintf("\t}\n")
 	}
 
