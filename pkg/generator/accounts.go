@@ -237,9 +237,16 @@ func (g *AccountsGenerator) generateAccount(account idl.AccountDef, _idl idl.IDL
 		}
 		
 		// Optional[T] handles its own presence byte; plain fields use Decode.
+		// AIDEV-NOTE: guard every field with decoder.Remaining() > 0. Anchor accounts are
+		// append-only: a program upgrade adds trailing fields, but accounts written before the
+		// upgrade (and not yet realloc'd) still carry the shorter layout. Decoding those must
+		// leave the new fields zero-valued rather than failing with EOF. Mirrors the same guard
+		// in types.go and events.go.
 		code += fmt.Sprintf("\t// Unmarshal field %s\n", field.Name)
-		code += fmt.Sprintf("\tif err := decoder.Decode(&a.%s); err != nil {\n", fieldName)
-		code += fmt.Sprintf("\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+		code += fmt.Sprintf("\tif decoder.Remaining() > 0 {\n")
+		code += fmt.Sprintf("\t\tif err := decoder.Decode(&a.%s); err != nil {\n", fieldName)
+		code += fmt.Sprintf("\t\t\treturn fmt.Errorf(\"failed to decode %s: %%w\", err)\n", field.Name)
+		code += fmt.Sprintf("\t\t}\n")
 		code += fmt.Sprintf("\t}\n")
 	}
 
